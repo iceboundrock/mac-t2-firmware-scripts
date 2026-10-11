@@ -25,7 +25,7 @@
 # SOFTWARE.
 
 rename_firmware () {
-	python3 rename_firmware.py "$@" 
+	python3 rename_firmware.py "$@"
 }
 
 set -euo pipefail
@@ -69,7 +69,7 @@ while getopts "ivhx" option; do
 		EOF
 		exit 0 ;;
 		x) set -x;;
-		?) exit 1 ;; 
+		?) exit 1 ;;
 	esac
 done
 
@@ -104,11 +104,30 @@ model_identifier() {
 	esac
 }
 
-# These models load brcmfmac4364b2-pcie.txt and brcmfmac4364b2-pcie.txcap_blob under
-# those generic names. nvram_txcap_quirk picks the right pair out of the firmware
-# tree, but it needs ioreg, so it only works on macOS.
+# iMac19,1, iMac19,2 and iMacPro1,1 load their 4364b2 firmware under these two generic
+# names. nvram_txcap_quirk picks the right pair out of the firmware tree, but it needs
+# ioreg, so it only works on macOS.
+TXCAP_FILES=(brcmfmac4364b2-pcie.txt brcmfmac4364b2-pcie.txcap_blob)
+
 needs_txcap_quirk() {
 	[[ $1 = iMac19,1 || $1 = iMac19,2 || $1 = iMacPro1,1 ]]
+}
+
+tree_has_txcap_files() {
+	local name
+	for name in "${TXCAP_FILES[@]}"; do
+		[[ -f "$1/$name" ]] || return 1
+	done
+}
+
+# True if every TXCAP_FILES entry is a top-level member of the archive, which is where
+# it has to be for 'tar -xC /lib/firmware/brcm' to put it where the driver looks.
+archive_has_txcap_files() {
+	local members name
+	members=$(tar -tf "$1") || return 1
+	for name in "${TXCAP_FILES[@]}"; do
+		grep -qxE "(\./)?${name//./\\.}" <<< "$members" || return 1
+	done
 }
 
 create_firmware_archive() {
@@ -117,6 +136,11 @@ create_firmware_archive() {
 	rename_firmware "$firmware_tree" "$archive" ${verbose}
 	if [[ "$os" = "Darwin" ]] && needs_txcap_quirk "$(model_identifier)"; then
 		nvram_txcap_quirk "$firmware_tree" "$archive"
+	elif tree_has_txcap_files "$firmware_tree"; then
+		# The upstream script's EFI step put the pair it picked on macOS at the root of
+		# firmware-raw.tar.gz. Keep it, as upstream's get_from_efi did; the renamer only
+		# looks at wifi/ and bluetooth/ and would drop it.
+		tar --append ${verbose} -f "$archive" -C "$firmware_tree" "${TXCAP_FILES[@]}"
 	fi
 }
 
@@ -178,24 +202,21 @@ archive_has_wifi_firmware() {
 	grep -q 'brcmfmac.*\.bin$' <<< "$members"
 }
 
-# On the txcap models an archive without the two generic files leaves Wi-Fi broken,
-# and only export_local on macOS can produce them. Refuse rather than install it
-# and report success.
+# On the txcap models an archive without both generic files leaves Wi-Fi broken, and
+# only macOS can pick them (export_local, or the upstream script's EFI step). Refuse
+# rather than install it and report success.
 check_txcap_files() {
 	local archive=$1
 	local identifier
 	identifier=$(model_identifier)
 	needs_txcap_quirk "$identifier" || return 0
-	local members
-	members=$(tar -tf "$archive")
-	if ! grep -q 'brcmfmac4364b2-pcie\.txcap_blob$' <<< "$members"; then
-		cat <<- EOF
-		Error: $identifier needs brcmfmac4364b2-pcie.txt and brcmfmac4364b2-pcie.txcap_blob,
-		which this script can only pick out on macOS (it needs ioreg). Run
-		'bash firmware.sh export_local' on macOS and install the firmware.tar it writes.
-		EOF
-		exit 1
-	fi
+	archive_has_txcap_files "$archive" && return 0
+	cat <<- EOF
+	Error: $identifier needs brcmfmac4364b2-pcie.txt and brcmfmac4364b2-pcie.txcap_blob,
+	which this script can only pick out on macOS (it needs ioreg). Run
+	'bash firmware.sh export_local' on macOS and install the firmware.tar it writes.
+	EOF
+	exit 1
 }
 
 install_local() {
