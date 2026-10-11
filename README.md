@@ -2,7 +2,7 @@
 
 ## What is this
 
-Wi-Fi will not work out of the box during or after installation because the required firmware is proprietary and cannot be redistributed by any Linux distro (e.g., CachyOS). You will need an internet connection (e.g., Ethernet, USB tethering) for the installation process unless you follow the steps below to prepare the Wi-Fi firmware beforehand and enable it during installation.
+Wi-Fi will not work out of the box during or after Linux installation because the required firmware is proprietary and cannot be redistributed by any Linux distro (e.g., CachyOS). You will need an internet connection (e.g., Ethernet, USB tethering) for the installation process unless you follow the steps below to prepare the Wi-Fi firmware beforehand and enable it during installation.
 
 This script extracts the Wi-Fi (and, on macOS Monterey or later, Bluetooth) firmware from macOS, renames the files the way the Linux `brcmfmac` driver expects, and installs them to `/lib/firmware/brcm`.
 
@@ -49,6 +49,8 @@ sudo umount /mnt/usb
 
 `install_local` extracts the tarball into `/lib/firmware/brcm` and reloads the `brcmfmac` and `hci_bcm4377` kernel modules. It also accepts a directory (a copy of `/usr/share/firmware`), a raw `.tar`, or the `firmware-raw.tar.gz` produced by the original script's EFI step, and runs the renaming step first in those cases. If you have mounted the macOS volume yourself, you can point it at `<mountpoint>/usr/share/firmware`.
 
+Two inputs are refused rather than installed. One is a path with no Wi-Fi firmware under it (a mistyped directory, say): the renaming step would otherwise produce an empty archive and the script would still report success. The other is any input on iMac19,1, iMac19,2 and iMacPro1,1 that lacks `brcmfmac4364b2-pcie.txt` and `brcmfmac4364b2-pcie.txcap_blob`. Those models load the firmware under these generic names, and picking the right pair out of the tree needs `ioreg`, so only `export_local` on macOS can produce them. On those models, use the `firmware.tar` from `export_local`; a directory or raw tar renamed on Linux will not work.
+
 Then switch NetworkManager to the iwd backend:
 
 ```sh
@@ -72,7 +74,7 @@ usage: firmware.sh [-ivhx] subcommand [subcmd args]
 | `rename_only <firmware_dir> <archive.tar>` | macOS | Only run the renaming step on a firmware tree |
 | `install_local [path]` | Linux | Install from a `.tar`, `.tar.gz` or directory; prompts for the path if omitted |
 
-Flags: `-i` skip the interactive menu, `-v` verbose, `-x` trace with `set -x`, `-h` help. With no subcommand the script shows a menu on macOS and runs `install_local` on Linux.
+Flags: `-i` never prompt (no menu on macOS, and `install_local` fails instead of asking for a path), `-v` verbose, `-x` trace with `set -x`, `-h` help. With no subcommand the script shows a menu on macOS and runs `install_local` on Linux, with or without `-i`.
 
 ## License
 

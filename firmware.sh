@@ -52,13 +52,19 @@ while getopts "ivhx" option; do
 		v) verbose="-v" ;;
 		h)
 		cat <<- EOF
-		usage: $0 [-vhx] subcommand [subcmd args]
+		usage: $0 [-ivhx] subcommand [subcmd args]
 
 		Subcommands:
 		export_local [output_dir]
 		create_archive
 		install_local [path_to_archive_or_dir]
 		rename_only /path/to/firmware archive.tar
+
+		Flags:
+		-i  never prompt: no menu on macOS, and install_local fails without a path
+		-v  verbose
+		-x  trace with set -x
+		-h  this help
 		EOF
 		exit 0 ;;
 		x) set -x;;
@@ -73,31 +79,37 @@ if [[ $# -gt 0 ]]; then
 	args=( "${@:2}" )
 fi
 
-if [[ "$subcmd" = "" ]] && [[ "$interactive" = "true" ]]; then
-	case "$(uname -s)" in
+os=$(uname -s)
+
+if [[ "$subcmd" = "" ]]; then
+	case "$os" in
 		(Darwin)
-			echo "Detected macOS"
-			cat <<- EOF
+			if [[ "$interactive" = "true" ]]; then
+				echo "Detected macOS"
+				cat <<- EOF
 
-			How do you want to extract the firmware?
+				How do you want to extract the firmware?
 
-			1. Export firmware tarball to a local directory / USB drive.
-			2. Create a tarball in Downloads ($HOME/Downloads/firmware.tar).
+				1. Export firmware tarball to a local directory / USB drive.
+				2. Create a tarball in Downloads ($HOME/Downloads/firmware.tar).
 
-			EOF
-			read -rp "Enter choice [1-2]: " choice
-			case ${choice} in
-				(1) subcmd="export_local" ;;
-				(2) subcmd="create_archive" ;;
-				(*) echo -e "\nError: Invalid option!" && exit 1 ;;
-			esac
+				EOF
+				read -rp "Enter choice [1-2]: " choice
+				case ${choice} in
+					(1) subcmd="export_local" ;;
+					(2) subcmd="create_archive" ;;
+					(*) echo -e "\nError: Invalid option!" && exit 1 ;;
+				esac
+			fi
 			;;
 		(Linux)
+			# install_local is the only Linux subcommand, so it is the default with or
+			# without -i. Without a path it prompts, or under -i fails.
 			echo "Detected Linux"
 			subcmd="install_local"
 			;;
 		(*)
-			echo "Error: Unsupported platform: $(uname -s)"
+			echo "Error: Unsupported platform: $os"
 			exit 1
 			;;
 	esac
@@ -115,16 +127,26 @@ python_check () {
 	fi
 }
 
+model_identifier() {
+	case "$os" in
+		(Darwin) system_profiler SPHardwareDataType | grep "Model Identifier" | cut -d ":" -f 2 | xargs || true ;;
+		(Linux) cat /sys/class/dmi/id/product_name 2>/dev/null || true ;;
+	esac
+}
+
+# These models load brcmfmac4364b2-pcie.txt and brcmfmac4364b2-pcie.txcap_blob under
+# those generic names. nvram_txcap_quirk picks the right pair out of the firmware
+# tree, but it needs ioreg, so it only works on macOS.
+needs_txcap_quirk() {
+	[[ $1 = iMac19,1 || $1 = iMac19,2 || $1 = iMacPro1,1 ]]
+}
+
 create_firmware_archive() {
 	local firmware_tree=$1
 	local archive=$2
 	rename_firmware "$firmware_tree" "$archive" ${verbose}
-	if [[ $(uname -s) = "Darwin" ]]; then
-		local identifier
-		identifier=$(system_profiler SPHardwareDataType | grep "Model Identifier" | cut -d ":" -f 2 | xargs)
-		if [[ (${identifier} = iMac19,1) || (${identifier} = iMac19,2) || (${identifier} = iMacPro1,1) ]]; then
-			nvram_txcap_quirk "$firmware_tree" "$archive"
-		fi
+	if [[ "$os" = "Darwin" ]] && needs_txcap_quirk "$(model_identifier)"; then
+		nvram_txcap_quirk "$firmware_tree" "$archive"
 	fi
 }
 
@@ -168,11 +190,46 @@ nvram_txcap_quirk() {
 	fi
 }
 
+# True if the tar already holds renamed firmware (brcmfmac*.bin) rather than a raw
+# macOS firmware tree. A raw tree has .trx files, and on the txcap models the
+# upstream script's raw tar also carries brcmfmac4364b2-pcie.txt at its root, so
+# matching on the name alone would misfile it. The listing is captured first so
+# grep -q quitting early cannot fail the pipeline under pipefail.
+archive_has_wifi_firmware() {
+	local members
+	members=$(tar -tf "$1" 2>/dev/null) || return 1
+	grep -q 'brcmfmac.*\.bin$' <<< "$members"
+}
+
+# On the txcap models an archive without the two generic files leaves Wi-Fi broken,
+# and only export_local on macOS can produce them. Refuse rather than install it
+# and report success.
+check_txcap_files() {
+	local archive=$1
+	local identifier
+	identifier=$(model_identifier)
+	needs_txcap_quirk "$identifier" || return 0
+	local members
+	members=$(tar -tf "$archive")
+	if ! grep -q 'brcmfmac4364b2-pcie\.txcap_blob$' <<< "$members"; then
+		cat <<- EOF
+		Error: $identifier needs brcmfmac4364b2-pcie.txt and brcmfmac4364b2-pcie.txcap_blob,
+		which this script can only pick out on macOS (it needs ioreg). Run
+		'bash firmware.sh export_local' on macOS and install the firmware.tar it writes.
+		EOF
+		exit 1
+	fi
+}
+
 install_local() {
 	local src_path="${1-}"
 	python_check
 
 	if [[ -z "$src_path" ]]; then
+		if [[ "$interactive" = "false" ]]; then
+			echo "Error: install_local needs the path to a firmware archive or directory when run with -i."
+			exit 1
+		fi
 		read -rp "Enter path to firmware file/folder (e.g. /mnt/usb/firmware.tar): " src_path
 	fi
 
@@ -184,38 +241,40 @@ install_local() {
 	local workdir
 	workdir=$(mktemp -d)
 	CLEANUP_PATHS+=("$workdir")
+	local archive="$workdir/firmware-renamed.tar"
 
 	echo -e "\nProcessing local firmware from: $src_path"
 
 	if [[ -d "$src_path" ]]; then
-		create_firmware_archive "$src_path" "$workdir/firmware-renamed.tar"
+		create_firmware_archive "$src_path" "$archive"
 	elif [[ "$src_path" == *.tar ]]; then
-		if tar -tf "$src_path" 2>/dev/null | grep -q "brcmfmac"; then
-			cp "$src_path" "$workdir/firmware-renamed.tar"
+		if archive_has_wifi_firmware "$src_path"; then
+			cp "$src_path" "$archive"
 		else
 			tar -xf "$src_path" -C "$workdir"
-			create_firmware_archive "$workdir" "$workdir/firmware-renamed.tar"
+			create_firmware_archive "$workdir" "$archive"
 		fi
 	elif [[ "$src_path" == *.tar.gz || "$src_path" == *.tgz ]]; then
 		tar -xzf "$src_path" -C "$workdir"
-		create_firmware_archive "$workdir" "$workdir/firmware-renamed.tar"
+		create_firmware_archive "$workdir" "$archive"
 	else
 		echo "Error: Unsupported file format. Please provide a directory or .tar / .tar.gz archive."
 		exit 1
 	fi
 
+	check_txcap_files "$archive"
+
 	echo "Installing firmware files to /lib/firmware/brcm..."
-	sudo tar ${verbose} -xC /lib/firmware/brcm -f "$workdir/firmware-renamed.tar"
+	sudo tar ${verbose} -xC /lib/firmware/brcm -f "$archive"
 	reload_kernel_modules
 	echo -e "\nDone! Firmware installation complete."
 }
 
-os=$(uname -s)
 case "$os" in
 	(Darwin)
 		ver=$(sw_vers -productVersion)
 		ver_check=$(sw_vers -productVersion | cut -d "." -f 1)
-		identifier=$(system_profiler SPHardwareDataType | grep "Model Identifier" | cut -d ":" -f 2 | xargs)
+		identifier=$(model_identifier)
 		if [[ ${ver_check} -lt 12 ]] && [[ (${identifier} = MacBookPro15,4) || (${identifier} = MacBookPro16,3) || (${identifier} = MacBookAir9,1) ]]; then
 			cat <<- EOF
 
