@@ -163,9 +163,17 @@ export_local() {
 		echo "Error: Firmware source '$src_dir' is not a directory."
 		exit 1
 	fi
-	mkdir -p "$target_dir"
 	echo -e "\nExporting firmware archive from $src_dir to: $target_dir"
-	create_firmware_archive "$src_dir" "$target_dir/firmware.tar"
+	# Build in scratch space and move the archive into place only once it has passed
+	# the check install_local applies, so a failed export leaves no firmware.tar
+	# behind and does not overwrite an earlier good one.
+	local workdir
+	workdir=$(mktemp -d)
+	CLEANUP_PATHS+=("$workdir")
+	create_firmware_archive "$src_dir" "$workdir/firmware.tar"
+	check_txcap_files "$workdir/firmware.tar"
+	mkdir -p "$target_dir"
+	mv ${verbose} "$workdir/firmware.tar" "$target_dir/firmware.tar"
 	cat <<- EOF
 
 	Firmware tarball successfully saved to:
@@ -176,19 +184,37 @@ export_local() {
 	EOF
 }
 
+# Appends the NVRAM and txcap files macOS chose for this Mac to the archive under the
+# generic names in TXCAP_FILES. ioreg lists the chosen files in a RequestedFiles
+# entry of the form
+#   ({"Firmware"="<dir>/<x>.trx","TxCap"="<dir>/<y>.txcb",
+#     "Regulatory"="<dir>/<y>.clmb","NVRAM"="<dir>/<z>.txt"})
+# and the cuts below pick <y>.txcb and <z>.txt out of it. Fails rather than skipping
+# the pair: without it Wi-Fi does not come up on these models, and nothing on Linux
+# can pick it later.
 nvram_txcap_quirk() {
 	local firmware_tree="$1"
 	local output_tar="$2"
-	local nvramfile
-	local txcapblob
-	nvramfile=$(ioreg -l | grep RequestedFiles | cut -d "/" -f 5 | rev | cut -c 4- | rev || true)
-	txcapblob=$(ioreg -l | grep RequestedFiles | cut -d "/" -f 3 | cut -d "\"" -f 1 || true)
-	if [[ -n "$nvramfile" && -n "$txcapblob" && -f "${firmware_tree}/wifi/C-4364__s-B2/${nvramfile}" ]]; then
-		cp ${verbose} "${firmware_tree}/wifi/C-4364__s-B2/${nvramfile}" brcmfmac4364b2-pcie.txt
-		cp ${verbose} "${firmware_tree}/wifi/C-4364__s-B2/${txcapblob}" brcmfmac4364b2-pcie.txcap_blob
-		tar --append ${verbose} -f "$output_tar" brcmfmac4364b2-pcie.txt brcmfmac4364b2-pcie.txcap_blob
-		rm ${verbose} brcmfmac4364b2-pcie.txt brcmfmac4364b2-pcie.txcap_blob
+	local requested nvramfile txcapblob src name stage
+	requested=$(ioreg -l | grep RequestedFiles || true)
+	nvramfile=$(cut -d "/" -f 5 <<< "$requested" | rev | cut -c 4- | rev)
+	txcapblob=$(cut -d "/" -f 3 <<< "$requested" | cut -d "\"" -f 1)
+	if [[ -z "$nvramfile" || -z "$txcapblob" ]]; then
+		echo "Error: Could not read this Mac's NVRAM and txcap file names from ioreg (RequestedFiles)."
+		exit 1
 	fi
+	src="$firmware_tree/wifi/C-4364__s-B2"
+	for name in "$nvramfile" "$txcapblob"; do
+		if [[ ! -f "$src/$name" ]]; then
+			echo "Error: ioreg says this Mac uses $name, but $src has no such file."
+			exit 1
+		fi
+	done
+	stage=$(mktemp -d)
+	CLEANUP_PATHS+=("$stage")
+	cp ${verbose} "$src/$nvramfile" "$stage/brcmfmac4364b2-pcie.txt"
+	cp ${verbose} "$src/$txcapblob" "$stage/brcmfmac4364b2-pcie.txcap_blob"
+	tar --append ${verbose} -f "$output_tar" -C "$stage" "${TXCAP_FILES[@]}"
 }
 
 # True if the tar already holds renamed firmware (brcmfmac*.bin) rather than a raw
@@ -202,9 +228,9 @@ archive_has_wifi_firmware() {
 	grep -q 'brcmfmac.*\.bin$' <<< "$members"
 }
 
-# On the txcap models an archive without both generic files leaves Wi-Fi broken, and
-# only macOS can pick them (export_local, or the upstream script's EFI step). Refuse
-# rather than install it and report success.
+# On the txcap models an archive without both generic files at its top level leaves
+# Wi-Fi broken. export_local and install_local both run this on the archive they are
+# about to hand over, so neither reports success without the pair.
 check_txcap_files() {
 	local archive=$1
 	local identifier
@@ -212,10 +238,15 @@ check_txcap_files() {
 	needs_txcap_quirk "$identifier" || return 0
 	archive_has_txcap_files "$archive" && return 0
 	cat <<- EOF
-	Error: $identifier needs brcmfmac4364b2-pcie.txt and brcmfmac4364b2-pcie.txcap_blob,
-	which this script can only pick out on macOS (it needs ioreg). Run
-	'bash firmware.sh export_local' on macOS and install the firmware.tar it writes.
+	Error: $identifier needs brcmfmac4364b2-pcie.txt and brcmfmac4364b2-pcie.txcap_blob at
+	the top level of the firmware archive, and this archive lacks them.
 	EOF
+	if [[ "$os" = Linux ]]; then
+		cat <<- EOF
+		Only macOS can pick them out (it needs ioreg). Run 'bash firmware.sh export_local'
+		on macOS on this model and install the firmware.tar it writes.
+		EOF
+	fi
 	exit 1
 }
 

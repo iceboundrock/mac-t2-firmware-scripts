@@ -34,7 +34,7 @@ bash firmware.sh export_local /Volumes/<your usb drive>/apple-firmware
 
 This reads `/usr/share/firmware`, renames the files and writes `firmware.tar` to the given directory. Without an argument it writes to `~/Downloads/apple-firmware-export/`.
 
-In special cases you can point it at a different firmware tree, such as a mounted volume from another Mac, with `FIRMWARE_SRC=/Volumes/<other mac>/usr/share/firmware bash firmware.sh export_local ...`. The `txcap` fix for iMac19,1, iMac19,2 and iMacPro1,1 still goes by the Mac running the script, so for those models export on the model itself.
+In special cases you can point it at a different firmware tree, such as a mounted volume from another Mac, with `FIRMWARE_SRC=/Volumes/<other mac>/usr/share/firmware bash firmware.sh export_local ...`. The `txcap` fix for iMac19,1, iMac19,2 and iMacPro1,1 still goes by the Mac running the script, so for those models export on the model itself. On those models the export fails and writes no `firmware.tar` if it cannot find the pair, rather than hand you an archive that `install_local` will refuse.
 
 Bluetooth firmware is only included from macOS Monterey (12) or later, and is only needed by MacBookPro15,4, MacBookPro16,3 and MacBookAir9,1. On other models or older macOS you only get Wi-Fi firmware, which is fine.
 
