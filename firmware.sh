@@ -113,6 +113,12 @@ needs_txcap_quirk() {
 	[[ $1 = iMac19,1 || $1 = iMac19,2 || $1 = iMacPro1,1 ]]
 }
 
+# The models whose Bluetooth runs on hci_bcm4377 and needs the firmware under
+# bluetooth/. The other T2 Macs do not use that driver, and older kernels do not have it.
+needs_bluetooth_firmware() {
+	[[ $1 = MacBookPro15,4 || $1 = MacBookPro16,3 || $1 = MacBookAir9,1 ]]
+}
+
 # A regular, non-empty file that is not a symlink: what the driver can read once the
 # tree lands in /lib/firmware/brcm. A symlink does not count: tar stores it as a link,
 # and once extracted it points at nothing the driver can read.
@@ -166,13 +172,37 @@ create_firmware_archive() {
 	fi
 }
 
+# Unloads and loads a driver so it reads the firmware just installed. modprobe -r of a
+# module that is not loaded succeeds (modprobe(8), --first-time), so a failed unload
+# means the loaded instance stays, in use or built in, and keeps its old firmware; a
+# failed load means the driver is not running at all. Either way the new firmware is not
+# in use, so the caller must not report success.
+reload_driver() {
+	sudo modprobe -r ${verbose} "$1" && sudo modprobe ${verbose} "$1"
+}
+
 reload_kernel_modules () {
-	echo "Reloading Wi-Fi and Bluetooth drivers..."
+	local drivers=(brcmfmac) driver failed=()
+	if needs_bluetooth_firmware "$(model_identifier)"; then
+		drivers+=(hci_bcm4377)
+	fi
+	echo "Reloading drivers: ${drivers[*]}..."
+	# brcmfmac_wcc uses brcmfmac and has to go first. Older kernels have no such module,
+	# which modprobe reports as an error, so this step may fail harmlessly; if it leaves
+	# brcmfmac in use, the next step says so.
 	sudo modprobe -r ${verbose} brcmfmac_wcc 2>/dev/null || true
-	sudo modprobe -r ${verbose} brcmfmac 2>/dev/null || true
-	sudo modprobe ${verbose} brcmfmac || true
-	sudo modprobe -r ${verbose} hci_bcm4377 2>/dev/null || true
-	sudo modprobe ${verbose} hci_bcm4377 || true
+	for driver in "${drivers[@]}"; do
+		reload_driver "$driver" || failed+=("$driver")
+	done
+	if [[ ${#failed[@]} -gt 0 ]]; then
+		cat <<- EOF
+
+		Error: The firmware is installed in /lib/firmware/brcm, but ${failed[*]} could not be
+		reloaded (see the modprobe message above), so the new firmware is not in use yet.
+		Rebooting loads the driver with it.
+		EOF
+		exit 1
+	fi
 }
 
 # Reads /usr/share/firmware, or FIRMWARE_SRC when set (for example a mounted volume
@@ -323,7 +353,7 @@ case "$os" in
 	(Darwin)
 		ver_check=$(sw_vers -productVersion | cut -d "." -f 1)
 		identifier=$(model_identifier)
-		if [[ ${ver_check} -lt 12 ]] && [[ (${identifier} = MacBookPro15,4) || (${identifier} = MacBookPro16,3) || (${identifier} = MacBookAir9,1) ]]; then
+		if [[ ${ver_check} -lt 12 ]] && needs_bluetooth_firmware "$identifier"; then
 			cat <<- EOF
 
 			Warning: You are running a macOS version earlier than macOS Monterey.
