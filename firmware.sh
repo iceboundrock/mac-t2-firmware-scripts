@@ -113,14 +113,31 @@ needs_txcap_quirk() {
 	[[ $1 = iMac19,1 || $1 = iMac19,2 || $1 = iMacPro1,1 ]]
 }
 
-# True if every TXCAP_FILES entry is a regular, non-empty file at the root of the tree.
-# A symlink does not count: tar stores it as a link, and once extracted into
-# /lib/firmware/brcm it points at nothing the driver can read.
+# A regular, non-empty file that is not a symlink: what the driver can read once the
+# tree lands in /lib/firmware/brcm. A symlink does not count: tar stores it as a link,
+# and once extracted it points at nothing the driver can read.
+usable_firmware_file() {
+	[[ -f "$1" && ! -L "$1" && -s "$1" ]]
+}
+
+# True if every TXCAP_FILES entry is a usable file at the root of the tree.
 tree_has_txcap_files() {
 	local name
 	for name in "${TXCAP_FILES[@]}"; do
-		[[ -f "$1/$name" && ! -L "$1/$name" && -s "$1/$name" ]] || return 1
+		usable_firmware_file "$1/$name" || return 1
 	done
+}
+
+# True if the tree holds renamed firmware: at least one brcmfmac*.bin as a usable file
+# at its root, which is where the driver looks. A raw tree has .trx files under wifi/
+# instead, and on the txcap models the upstream script's raw tar also carries
+# brcmfmac4364b2-pcie.txt at its root, so the name alone would misfile it.
+tree_has_wifi_firmware() {
+	local file
+	for file in "$1"/brcmfmac*.bin; do
+		usable_firmware_file "$file" && return 0
+	done
+	return 1
 }
 
 # The same test on an archive: extract it into scratch space and inspect what
@@ -222,17 +239,6 @@ nvram_txcap_quirk() {
 	tar --append ${verbose} -f "$output_tar" -C "$stage" "${TXCAP_FILES[@]}"
 }
 
-# True if the tar already holds renamed firmware (brcmfmac*.bin) rather than a raw
-# macOS firmware tree. A raw tree has .trx files, and on the txcap models the
-# upstream script's raw tar also carries brcmfmac4364b2-pcie.txt at its root, so
-# matching on the name alone would misfile it. The listing is captured first so
-# grep -q quitting early cannot fail the pipeline under pipefail.
-archive_has_wifi_firmware() {
-	local members
-	members=$(tar -tf "$1" 2>/dev/null) || return 1
-	grep -q 'brcmfmac.*\.bin$' <<< "$members"
-}
-
 # On the txcap models an archive without both generic files at its top level leaves
 # Wi-Fi broken. export_local and install_local both run this on the archive they are
 # about to hand over, so neither reports success without the pair.
@@ -281,16 +287,20 @@ install_local() {
 
 	if [[ -d "$src_path" ]]; then
 		create_firmware_archive "$src_path" "$archive"
-	elif [[ "$src_path" == *.tar ]]; then
-		if archive_has_wifi_firmware "$src_path"; then
+	elif [[ "$src_path" == *.tar || "$src_path" == *.tar.gz || "$src_path" == *.tgz ]]; then
+		# Extract first and go by what the extraction leaves, as the txcap check does: a
+		# member listing cannot tell a usable top-level brcmfmac*.bin from a nested, empty
+		# or symlinked one, and a nested one lands where the driver does not look. tar
+		# detects gzip on its own when reading.
+		local extracted="$workdir/extracted"
+		mkdir "$extracted"
+		tar -xf "$src_path" -C "$extracted"
+		if tree_has_wifi_firmware "$extracted"; then
+			# Already renamed: install the archive as it is.
 			cp "$src_path" "$archive"
 		else
-			tar -xf "$src_path" -C "$workdir"
-			create_firmware_archive "$workdir" "$archive"
+			create_firmware_archive "$extracted" "$archive"
 		fi
-	elif [[ "$src_path" == *.tar.gz || "$src_path" == *.tgz ]]; then
-		tar -xzf "$src_path" -C "$workdir"
-		create_firmware_archive "$workdir" "$archive"
 	else
 		echo "Error: Unsupported file format. Please provide a directory or .tar / .tar.gz archive."
 		exit 1
