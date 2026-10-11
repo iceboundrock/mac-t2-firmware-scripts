@@ -16,8 +16,9 @@ The original script can be downloaded from [here](https://wiki.t2linux.org/tools
 2. The original script uses the EFI partition as a temp storage for the firmware, I don't want a script messing with my EFI partition.
 3. The original script has a python script embedded which is easy to distribute but hard to read. It now lives in `rename_firmware.py`.
 4. The original script contains code to build installer packages (deb, rpm, pacman) for various Linux distros which I don't think are necessary.
+5. The original script can mount the macOS APFS partition from Linux and read the firmware from there. That needs the out-of-tree `linux-apfs-rw` driver, which the CachyOS live ISO doesn't have and which you can't install without the network you are trying to get. It also skips the `txcap` fix for iMac19,1/19,2 and iMacPro1,1, because that fix needs `ioreg` on macOS. A USB drive covers the same case, so that path is gone.
 
-What's left: on macOS, export the renamed firmware as a tarball to a folder or USB drive. On Linux, install from that tarball, or read it directly from the macOS APFS partition. Nothing is downloaded and no packages are installed on your behalf.
+What's left: on macOS, export the renamed firmware as a tarball to a folder or USB drive. On Linux, install from that tarball. Nothing is downloaded and no packages are installed on your behalf.
 
 ## Usage
 
@@ -46,7 +47,7 @@ bash firmware.sh install_local /mnt/usb/apple-firmware/firmware.tar
 sudo umount /mnt/usb
 ```
 
-`install_local` extracts the tarball into `/lib/firmware/brcm` and reloads the `brcmfmac` and `hci_bcm4377` kernel modules. It also accepts a directory (a copy of `/usr/share/firmware`), a raw `.tar`, or the `firmware-raw.tar.gz` produced by the original script's EFI step, and runs the renaming step first in those cases.
+`install_local` extracts the tarball into `/lib/firmware/brcm` and reloads the `brcmfmac` and `hci_bcm4377` kernel modules. It also accepts a directory (a copy of `/usr/share/firmware`), a raw `.tar`, or the `firmware-raw.tar.gz` produced by the original script's EFI step, and runs the renaming step first in those cases. If you have mounted the macOS volume yourself, you can point it at `<mountpoint>/usr/share/firmware`.
 
 Then switch NetworkManager to the iwd backend:
 
@@ -57,16 +58,6 @@ wifi.backend=iwd
 EOF
 sudo systemctl restart NetworkManager
 ```
-
-### Alternative: read the firmware from the macOS partition in Linux
-
-If you skipped the macOS step, Linux can read the firmware directly from the APFS volume on the same disk:
-
-```sh
-bash firmware.sh get_from_macos
-```
-
-This needs the APFS kernel module ([linux-apfs-rw](https://github.com/linux-apfs/linux-apfs-rw), `linux-apfs-rw-dkms-git` on the AUR). The script does not install it for you. It mounts the first APFS partition `lsblk` reports, looks for `usr/share/firmware` in its volumes, installs the firmware, reloads the drivers and unmounts.
 
 ## Subcommands
 
@@ -80,9 +71,8 @@ usage: firmware.sh [-ivhx] subcommand [subcmd args]
 | `create_archive` | macOS | Write renamed `firmware.tar` to `~/Downloads` |
 | `rename_only <firmware_dir> <archive.tar>` | macOS | Only run the renaming step on a firmware tree |
 | `install_local [path]` | Linux | Install from a `.tar`, `.tar.gz` or directory; prompts for the path if omitted |
-| `get_from_macos` | Linux | Mount the local APFS volume and install from it |
 
-Flags: `-i` skip the interactive menu, `-v` verbose, `-x` trace with `set -x`, `-h` help. With no subcommand the script shows a menu for the current OS.
+Flags: `-i` skip the interactive menu, `-v` verbose, `-x` trace with `set -x`, `-h` help. With no subcommand the script shows a menu on macOS and runs `install_local` on Linux.
 
 ## License
 

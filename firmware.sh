@@ -58,7 +58,6 @@ while getopts "ivhx" option; do
 		export_local [output_dir]
 		create_archive
 		install_local [path_to_archive_or_dir]
-		get_from_macos
 		rename_only /path/to/firmware archive.tar
 		EOF
 		exit 0 ;;
@@ -95,20 +94,7 @@ if [[ "$subcmd" = "" ]] && [[ "$interactive" = "true" ]]; then
 			;;
 		(Linux)
 			echo "Detected Linux"
-			cat <<- EOF
-
-			How do you want to install the firmware?
-
-			1. Install firmware from a local file or directory (e.g. USB drive).
-			2. Extract and install firmware directly from a local macOS APFS partition.
-
-			EOF
-			read -rp "Enter choice [1-2]: " choice
-			case ${choice} in
-				(1) subcmd="install_local" ;;
-				(2) subcmd="get_from_macos" ;;
-				(*) echo -e "\nError: Invalid option!" && exit 1 ;;
-			esac
+			subcmd="install_local"
 			;;
 		(*)
 			echo "Error: Unsupported platform: $(uname -s)"
@@ -267,47 +253,6 @@ case "$os" in
 		case ${subcmd} in
 			("install_local")
 				install_local "${args[0]-}"
-				;;
-			("get_from_macos")
-				echo -e "\nChecking APFS module..."
-				sudo modprobe ${verbose} apfs 2>/dev/null || true
-
-				workdir=$(mktemp -d)
-				macosdir=$(mktemp -d)
-				CLEANUP_PATHS+=("$workdir" "$macosdir")
-
-				macosvol=$(lsblk -o NAME,FSTYPE | grep -i apfs | head -1 | awk '{print $1}' | sed 's/[^a-zA-Z0-9]//g')
-				if [[ -z "$macosvol" ]]; then
-					echo "Error: Could not automatically detect an APFS partition."
-					exit 1
-				fi
-
-				fwlocation=""
-				echo "Mounting macOS partition /dev/$macosvol..."
-				for i in 0 1 2 3 4 5; do
-					mkdir -p "${macosdir}/vol${i}"
-					sudo mount -o vol=${i} "/dev/${macosvol}" "${macosdir}/vol${i}" 2>/dev/null || true
-					if [ -d "${macosdir}/vol${i}/usr/share/firmware" ]; then
-						fwlocation="${macosdir}/vol${i}/usr/share/firmware"
-					fi
-				done
-
-				if [[ -z "${fwlocation}" ]]; then
-					echo "Error: Could not find firmware directory inside macOS volume."
-					exit 1
-				fi
-
-				echo "Found firmware at: ${fwlocation}"
-				create_firmware_archive "${fwlocation}" "${workdir}/firmware-renamed.tar"
-				sudo tar ${verbose} -xC /lib/firmware/brcm -f "${workdir}/firmware-renamed.tar"
-				
-				# Unmount APFS volumes
-				for i in 0 1 2 3 4 5; do
-					sudo umount "${macosdir}/vol${i}" 2>/dev/null || true
-				done
-
-				reload_kernel_modules
-				echo "Done!"
 				;;
 			(*)
 				echo "Error: Invalid option '$subcmd'!"
