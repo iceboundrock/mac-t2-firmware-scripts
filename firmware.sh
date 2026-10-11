@@ -113,21 +113,26 @@ needs_txcap_quirk() {
 	[[ $1 = iMac19,1 || $1 = iMac19,2 || $1 = iMacPro1,1 ]]
 }
 
+# True if every TXCAP_FILES entry is a regular, non-empty file at the root of the tree.
+# A symlink does not count: tar stores it as a link, and once extracted into
+# /lib/firmware/brcm it points at nothing the driver can read.
 tree_has_txcap_files() {
 	local name
 	for name in "${TXCAP_FILES[@]}"; do
-		[[ -f "$1/$name" ]] || return 1
+		[[ -f "$1/$name" && ! -L "$1/$name" && -s "$1/$name" ]] || return 1
 	done
 }
 
-# True if every TXCAP_FILES entry is a top-level member of the archive, which is where
-# it has to be for 'tar -xC /lib/firmware/brcm' to put it where the driver looks.
+# The same test on an archive: extract it into scratch space and inspect what
+# 'tar -xC /lib/firmware/brcm' would produce. The member listing alone would accept a
+# symlink or an empty file under the right name, and only a top-level member lands
+# where the driver looks.
 archive_has_txcap_files() {
-	local members name
-	members=$(tar -tf "$1") || return 1
-	for name in "${TXCAP_FILES[@]}"; do
-		grep -qxE "(\./)?${name//./\\.}" <<< "$members" || return 1
-	done
+	local extracted
+	extracted=$(mktemp -d)
+	CLEANUP_PATHS+=("$extracted")
+	tar -xf "$1" -C "$extracted" || return 1
+	tree_has_txcap_files "$extracted"
 }
 
 create_firmware_archive() {
@@ -238,8 +243,8 @@ check_txcap_files() {
 	needs_txcap_quirk "$identifier" || return 0
 	archive_has_txcap_files "$archive" && return 0
 	cat <<- EOF
-	Error: $identifier needs brcmfmac4364b2-pcie.txt and brcmfmac4364b2-pcie.txcap_blob at
-	the top level of the firmware archive, and this archive lacks them.
+	Error: $identifier needs brcmfmac4364b2-pcie.txt and brcmfmac4364b2-pcie.txcap_blob as
+	regular files at the top level of the firmware archive, and this archive lacks them.
 	EOF
 	if [[ "$os" = Linux ]]; then
 		cat <<- EOF
@@ -293,6 +298,11 @@ install_local() {
 
 	check_txcap_files "$archive"
 
+	# Nothing runs under sudo until the input has passed every check above.
+	if [[ ! -d /lib/firmware/brcm ]]; then
+		echo "Creating /lib/firmware/brcm directory..."
+		sudo mkdir -p /lib/firmware/brcm
+	fi
 	echo "Installing firmware files to /lib/firmware/brcm..."
 	sudo tar ${verbose} -xC /lib/firmware/brcm -f "$archive"
 	reload_kernel_modules
@@ -324,10 +334,6 @@ case "$os" in
 		;;
 
 	(Linux)
-		if [[ ! -d /lib/firmware/brcm ]]; then
-			echo "Creating /lib/firmware/brcm directory..."
-			sudo mkdir -p /lib/firmware/brcm
-		fi
 		case ${subcmd} in
 			("install_local")
 				install_local "${args[0]-}"
