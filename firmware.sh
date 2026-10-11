@@ -52,16 +52,17 @@ while getopts "ivhx" option; do
 		v) verbose="-v" ;;
 		h)
 		cat <<- EOF
-		usage: $0 [-ivhx] subcommand [subcmd args]
+		usage: $0 [-ivhx] [subcommand] [subcmd args]
 
-		Subcommands:
-		export_local [output_dir]
-		create_archive
-		install_local [path_to_archive_or_dir]
-		rename_only /path/to/firmware archive.tar
+		Subcommands (the default is export_local on macOS, install_local on Linux):
+		export_local [output_dir]              macOS: write renamed firmware.tar to output_dir
+		install_local [path_to_archive_or_dir]  Linux: install from a firmware.tar, raw tar or directory
+
+		Environment:
+		FIRMWARE_SRC  firmware tree export_local reads (default /usr/share/firmware)
 
 		Flags:
-		-i  never prompt: no menu on macOS, and install_local fails without a path
+		-i  never prompt: install_local fails without a path instead of asking
 		-v  verbose
 		-x  trace with set -x
 		-h  this help
@@ -81,43 +82,12 @@ fi
 
 os=$(uname -s)
 
+# One action per platform, so the subcommand may be left out.
 if [[ "$subcmd" = "" ]]; then
 	case "$os" in
-		(Darwin)
-			if [[ "$interactive" = "true" ]]; then
-				echo "Detected macOS"
-				cat <<- EOF
-
-				How do you want to extract the firmware?
-
-				1. Export firmware tarball to a local directory / USB drive.
-				2. Create a tarball in Downloads ($HOME/Downloads/firmware.tar).
-
-				EOF
-				read -rp "Enter choice [1-2]: " choice
-				case ${choice} in
-					(1) subcmd="export_local" ;;
-					(2) subcmd="create_archive" ;;
-					(*) echo -e "\nError: Invalid option!" && exit 1 ;;
-				esac
-			fi
-			;;
-		(Linux)
-			# install_local is the only Linux subcommand, so it is the default with or
-			# without -i. Without a path it prompts, or under -i fails.
-			echo "Detected Linux"
-			subcmd="install_local"
-			;;
-		(*)
-			echo "Error: Unsupported platform: $os"
-			exit 1
-			;;
+		(Darwin) subcmd="export_local" ;;
+		(Linux) subcmd="install_local" ;;
 	esac
-fi
-
-if [[ "$subcmd" = "" ]]; then
-	echo "Error: No subcommand specified."
-	exit 1
 fi
 
 python_check () {
@@ -159,12 +129,19 @@ reload_kernel_modules () {
 	sudo modprobe ${verbose} hci_bcm4377 || true
 }
 
+# Reads /usr/share/firmware, or FIRMWARE_SRC when set (for example a mounted volume
+# from another Mac). The txcap quirk still goes by the Mac running the script.
 export_local() {
 	local target_dir="${1:-$HOME/Downloads/apple-firmware-export}"
+	local src_dir="${FIRMWARE_SRC:-/usr/share/firmware}"
 	python_check
+	if [[ ! -d "$src_dir" ]]; then
+		echo "Error: Firmware source '$src_dir' is not a directory."
+		exit 1
+	fi
 	mkdir -p "$target_dir"
-	echo -e "\nExporting firmware archive to: $target_dir"
-	create_firmware_archive /usr/share/firmware "$target_dir/firmware.tar"
+	echo -e "\nExporting firmware archive from $src_dir to: $target_dir"
+	create_firmware_archive "$src_dir" "$target_dir/firmware.tar"
 	cat <<- EOF
 
 	Firmware tarball successfully saved to:
@@ -272,7 +249,6 @@ install_local() {
 
 case "$os" in
 	(Darwin)
-		ver=$(sw_vers -productVersion)
 		ver_check=$(sw_vers -productVersion | cut -d "." -f 1)
 		identifier=$(model_identifier)
 		if [[ ${ver_check} -lt 12 ]] && [[ (${identifier} = MacBookPro15,4) || (${identifier} = MacBookPro16,3) || (${identifier} = MacBookAir9,1) ]]; then
@@ -287,15 +263,6 @@ case "$os" in
 		case ${subcmd} in
 			("export_local")
 				export_local "${args[0]-}"
-				;;
-			("create_archive")
-				python_check
-				echo -e "\nCreating firmware archive in Downloads..."
-				create_firmware_archive /usr/share/firmware "$HOME/Downloads/firmware.tar"
-				echo "Saved to $HOME/Downloads/firmware.tar"
-				;;
-			("rename_only")
-				rename_firmware "${args[@]}" ${verbose}
 				;;
 			(*)
 				echo "Error: Invalid option '$subcmd'!"

@@ -34,6 +34,8 @@ bash firmware.sh export_local /Volumes/<your usb drive>/apple-firmware
 
 This reads `/usr/share/firmware`, renames the files and writes `firmware.tar` to the given directory. Without an argument it writes to `~/Downloads/apple-firmware-export/`.
 
+In special cases you can point it at a different firmware tree, such as a mounted volume from another Mac, with `FIRMWARE_SRC=/Volumes/<other mac>/usr/share/firmware bash firmware.sh export_local ...`. The `txcap` fix for iMac19,1, iMac19,2 and iMacPro1,1 still goes by the Mac running the script, so for those models export on the model itself.
+
 Bluetooth firmware is only included from macOS Monterey (12) or later, and is only needed by MacBookPro15,4, MacBookPro16,3 and MacBookAir9,1. On other models or older macOS you only get Wi-Fi firmware, which is fine.
 
 ### Install to Linux
@@ -64,17 +66,15 @@ sudo systemctl restart NetworkManager
 ## Subcommands
 
 ```
-usage: firmware.sh [-ivhx] subcommand [subcmd args]
+usage: firmware.sh [-ivhx] [subcommand] [subcmd args]
 ```
 
 | Subcommand | Platform | What it does |
 |---|---|---|
-| `export_local [output_dir]` | macOS | Write renamed `firmware.tar` to `output_dir` (default `~/Downloads/apple-firmware-export`) |
-| `create_archive` | macOS | Write renamed `firmware.tar` to `~/Downloads` |
-| `rename_only <firmware_dir> <archive.tar>` | macOS | Only run the renaming step on a firmware tree |
+| `export_local [output_dir]` | macOS | Write renamed `firmware.tar` to `output_dir` (default `~/Downloads/apple-firmware-export`), reading `/usr/share/firmware` or `$FIRMWARE_SRC` |
 | `install_local [path]` | Linux | Install from a `.tar`, `.tar.gz` or directory; prompts for the path if omitted |
 
-Flags: `-i` never prompt (no menu on macOS, and `install_local` fails instead of asking for a path), `-v` verbose, `-x` trace with `set -x`, `-h` help. With no subcommand the script shows a menu on macOS and runs `install_local` on Linux, with or without `-i`.
+Flags: `-i` never prompt (`install_local` fails instead of asking for a path), `-v` verbose, `-x` trace with `set -x`, `-h` help. The subcommand is optional: with none, the script runs `export_local` on macOS and `install_local` on Linux.
 
 ## License
 
