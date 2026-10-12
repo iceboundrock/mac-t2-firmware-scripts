@@ -44,12 +44,14 @@ esac
 [ -z "$synthetic" ] || [ -z "${FIRMWARE_SRC-}" ] ||
 	usage "--synthetic writes its own tree, but FIRMWARE_SRC names $FIRMWARE_SRC"
 # Started from another run.sh, as by the A cases: without this stop, A5 would recurse.
-if [ -n "${RUN_SH_PARENT-}" ]; then
+# RUN_SH_PARENT names that run's scratch directory, and the stop needs the marker that run
+# wrote there, so a RUN_SH_PARENT from anywhere else, such as the caller's environment,
+# cannot skip the suite.
+if [ -n "${RUN_SH_PARENT-}" ] && [ -e "$RUN_SH_PARENT/run.sh-parent" ]; then
 	if [ -n "$synthetic" ]; then tree="a synthetic tree"; else tree=${FIRMWARE_SRC:-/usr/share/firmware}; fi
-	echo "run.sh: started from run.sh $RUN_SH_PARENT, so stopping here; would read $tree"
+	echo "run.sh: started from another run.sh, so stopping here; would read $tree"
 	exit 0
 fi
-export RUN_SH_PARENT=$$
 TESTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$TESTS")
 # firmware.sh calls rename_firmware.py by relative path, so it is run from the repo.
@@ -67,6 +69,9 @@ cleanup() {
 trap cleanup EXIT
 F="$S/fixtures"; OUT="$S/out"; H="$S/home"
 mkdir -p "$OUT" "$H"
+# For the stop above, in each run.sh started from this one.
+: > "$S/run.sh-parent" || exit 2
+export RUN_SH_PARENT=$S
 if [ -n "$synthetic" ]; then
 	bash "$TESTS/synth-tree.sh" "$S/tree" || exit 2
 	export FIRMWARE_SRC="$S/tree"
@@ -335,7 +340,7 @@ run I14-dir-symlink-pair 1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML"
 # Refused by the renamer, not the txcap guard: the archive was never accepted as renamed.
 run I15-nested-bin-tar   1 "no Wi-Fi firmware found"       "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/nested-bin.tar"
 
-echo "== tests/run.sh arguments (nested, so each stops before its suite) =="
+echo "== tests/run.sh arguments (nested, so none runs a suite) =="
 # Each case sets FIRMWARE_SRC itself rather than inherit this run's.
 run A1-unknown-arg       2 "usage: bash tests/run.sh"      "" "" "" env -u FIRMWARE_SRC bash tests/run.sh --bogus
 run A2-empty-arg         2 "usage: bash tests/run.sh"      "" "" "" env -u FIRMWARE_SRC bash tests/run.sh ""
@@ -344,6 +349,9 @@ run A4-synthetic-and-src 2 "--synthetic writes its own tree" "" "" "" env FIRMWA
 # An empty FIRMWARE_SRC counts as unset, as in firmware.sh.
 run A5-synthetic-empty-src 0 "would read a synthetic tree" "" "" "" env FIRMWARE_SRC= bash tests/run.sh --synthetic
 run A6-src               0 "would read /elsewhere$"        "" "" "" env FIRMWARE_SRC=/elsewhere bash tests/run.sh
+# A RUN_SH_PARENT that no run.sh set must not skip the suite. The tree is missing, so the
+# nested run gets as far as building fixtures and fails there instead of running a suite.
+run A7-foreign-parent    2 "build-fixtures: $S/no-tree/wifi not found" "" "" "" env RUN_SH_PARENT=external FIRMWARE_SRC="$S/no-tree" bash tests/run.sh
 
 echo "== $pass passed, $fail failed, $skip skipped =="
 [ "$fail" = 0 ]
