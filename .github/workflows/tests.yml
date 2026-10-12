@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: probe (temporary)
+        continue-on-error: true
+        run: |
+          set -x
+          uname -a; tar --version | head -1; python3 --version; bash --version | head -1
+          command -v rev shasum gzip || true
+          ls -ld /lib/firmware/brcm || true
+          ls -ld /usr/share/firmware /usr/share/firmware/wifi/C-4364__s-B2 || true
+          ls /usr/share/firmware/wifi 2>/dev/null | head -20 || true
+          (sw_vers; system_profiler SPHardwareDataType | grep -i model) 2>/dev/null || true
+          cat /sys/class/dmi/id/product_name 2>/dev/null || true
+      - name: real tree (temporary)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: bash tests/run.sh
+      # firmware.sh skips its mkdir when /lib/firmware/brcm exists. No Mac has it, so the
+      # macOS job sees the mkdir; this makes the Linux job see the skip.
+      - if: runner.os == 'Linux'
+        run: sudo mkdir -p /lib/firmware/brcm
+      - run: bash tests/run.sh --synthetic

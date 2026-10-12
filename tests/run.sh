@@ -1,29 +1,42 @@
 #!/usr/bin/env bash
-# Runs firmware.sh through its macOS path for real, as a model the scripts in
-# mocks/macos report, and through its Linux path with uname, sudo and the DMI model read
-# replaced by the scripts in mocks/linux. Each case checks the exit code, a message, what
-# would have been handed to sudo, and that every temp directory it made is gone
-# (mocks/common/mktemp records them). build-fixtures.sh makes the inputs from this Mac's
-# /usr/share/firmware at run time; nothing proprietary is checked in. Everything is
-# written under one mktemp directory. It is removed at exit when every check passed; a
-# failed case prints its output, and the directory is kept, with its path printed, so the
-# per-case output and sudo logs under out/ and the fixtures can be inspected.
+# Runs firmware.sh through its macOS path as the Mac the scripts in mocks/macos describe,
+# and through its Linux path with uname, sudo and the DMI model read replaced by the
+# scripts in mocks/linux. Each case checks the exit code, a message, what would have been
+# handed to sudo, and that every temp directory it made is gone (mocks/common/mktemp
+# records them). Everything is written under one mktemp directory. It is removed at exit
+# when every check passed; a failed case prints its output, and the directory is kept,
+# with its path printed, so the per-case output and sudo logs under out/ and the fixtures
+# can be inspected.
 #
-# Needs a Mac with /usr/share/firmware, bash and python3. Only H1 depends on which Mac
-# runs the suite: the other macOS cases take their model from the mocks, and the Linux
-# cases from the mocked DMI read or, without one, from the DMI file no Mac has. H1 exports
-# as this Mac and expects success; on iMac19,1, iMac19,2 and iMacPro1,1 that goes through
-# the real ioreg.
+# build-fixtures.sh makes the inputs at run time from a firmware tree: FIRMWARE_SRC if
+# set, else /usr/share/firmware, the default firmware.sh has too. The export_local cases
+# that set no FIRMWARE_SRC of their own inherit it, so they read the tree the reference
+# archive was built from. With --synthetic the tree is a stand-in from synth-tree.sh,
+# written into the scratch directory, so the suite runs without Apple's tree, which
+# cannot be checked in.
 #
-# Usage: bash tests/run.sh
+# Needs bash and python3, and runs on macOS or Linux; on Linux the cases run GNU tar
+# instead of bsdtar. Only H1 depends on the host: the other macOS cases take their model
+# and macOS version from the mocks, and the Linux cases their model from the mocked DMI
+# read (none when unset, as on a Mac). H1 exports as this Mac and expects success; on
+# iMac19,1, iMac19,2 and iMacPro1,1 that goes through the real ioreg, which may name files
+# a synthetic tree lacks. Off macOS, H1 is skipped.
+#
+# Usage: [FIRMWARE_SRC=<tree>] bash tests/run.sh [--synthetic]
 
+synthetic=""
+case "${1-}" in
+	("") ;;
+	(--synthetic) synthetic=1 ;;
+	(*) echo "usage: [FIRMWARE_SRC=<tree>] bash tests/run.sh [--synthetic]" >&2; exit 2 ;;
+esac
 TESTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$TESTS")
 # firmware.sh calls rename_firmware.py by relative path, so it is run from the repo.
 cd "$REPO" || exit 2
 
 S=$(mktemp -d) || exit 2
-pass=0; fail=0
+pass=0; fail=0; skip=0
 cleanup() {
 	if [ "$fail" = 0 ]; then
 		rm -rf "$S"
@@ -34,7 +47,12 @@ cleanup() {
 trap cleanup EXIT
 F="$S/fixtures"; OUT="$S/out"; H="$S/home"
 mkdir -p "$OUT" "$H"
-bash "$TESTS/build-fixtures.sh" "$F" || exit 2
+if [ -n "$synthetic" ]; then
+	bash "$TESTS/synth-tree.sh" "$S/tree" || exit 2
+	export FIRMWARE_SRC="$S/tree"
+fi
+SRC=${FIRMWARE_SRC:-/usr/share/firmware}
+bash "$TESTS/build-fixtures.sh" "$F" "$SRC" || exit 2
 
 members() { tar -tf "$1" | wc -l | tr -d ' '; }
 # members_eq <archive> <count>: true if the archive has that many members; says how many it has otherwise.
@@ -49,10 +67,9 @@ same_contents() { diff <(manifest "$2") <(manifest "$1"); }
 #   exit      expected exit code
 #   pattern   must appear in the combined stdout/stderr
 #   installs  "-": nothing may run under sudo (the input was refused);
-#             an archive: sudo must run "mkdir -p /lib/firmware/brcm", then one tar into
-#             /lib/firmware/brcm of an archive with the same manifest as this one, then
-#             nothing but modprobe (the directory never exists on a Mac, so the mkdir is
-#             always seen); "": no sudo check (macOS cases)
+#             an archive: sudo must run the mkdir in MKDIR if there is one, then one tar
+#             into /lib/firmware/brcm of an archive with the same manifest as this one,
+#             then nothing but modprobe; "": no sudo check (macOS cases)
 #   stdin     fed to the command (the prompted-path case)
 #   prefix    directory put first on PATH ("" for none), ahead of mocks/common
 # The output goes to $OUT/<name>.out, the sudo log to $OUT/<name>.sudo, the manifest of
@@ -73,9 +90,10 @@ run() {
 		# Exactly one install: a second tar, or anything but a driver reload after the
 		# first, fails the case even where no sudo_sequence pins the modprobe calls.
 		cmds=$(cut -d' ' -f2- "$SUDO_LOG")
-		if ! { [ "$(sed -n 1p <<< "$cmds")" = "mkdir -p /lib/firmware/brcm" ] &&
-			sed -n 2p <<< "$cmds" | grep -q '^tar -xC /lib/firmware/brcm -f ' &&
-			! sed -n '3,$p' <<< "$cmds" | grep -qv '^modprobe '; }; then
+		local n=${#MKDIR[@]}
+		if ! { { [ "$n" = 0 ] || [ "$(sed -n 1p <<< "$cmds")" = "${MKDIR[0]}" ]; } &&
+			sed -n "$((n + 1))p" <<< "$cmds" | grep -q '^tar -xC /lib/firmware/brcm -f ' &&
+			! sed -n "$((n + 2)),\$p" <<< "$cmds" | grep -qv '^modprobe '; }; then
 			ok=0; why+=" sudo-order:$(cut -d' ' -f1 <<< "$cmds" | tr '\n' ,)"
 		fi
 		differs=$(diff <(manifest "$want_installed") "$SUDO_LOG.manifest") || { ok=0; why+=" installed-differs-from:${want_installed##*/}"; }
@@ -124,9 +142,13 @@ sudo_sequence() {
 }
 
 ML="$TESTS/mocks/linux"; MM="$TESTS/mocks/macos"
+# firmware.sh creates /lib/firmware/brcm only when it is missing. It always is on a Mac;
+# a Linux host with linux-firmware installed has it. An accepted install must start with
+# this mkdir exactly when this host lacks the directory.
+if [ -d /lib/firmware/brcm ]; then MKDIR=(); else MKDIR=("mkdir -p /lib/firmware/brcm"); fi
 # shellcheck disable=SC2034  # used in check conditions
 TXT=brcmfmac4364b2-pcie.txt BLOB=brcmfmac4364b2-pcie.txcap_blob
-SRC=/usr/share/firmware; SRC4364="$SRC/wifi/C-4364__s-B2"
+SRC4364="$SRC/wifi/C-4364__s-B2"
 KAUAI_TXT=$(cat "$F/kauai-txt-name")
 sha() { shasum -a 256 | cut -d' ' -f1; }
 # shellcheck disable=SC2034  # used in check conditions
@@ -137,15 +159,16 @@ B="$F/renamed.tar"
 # B plus the synthesized txcap pair at the top level: what installing any input that
 # carries that pair at its root should hand to sudo tar.
 BPAIR="$F/renamed-with-txcap.tar"
-# Member counts follow this Mac's tree: N for renamed firmware, N+2 with the txcap pair.
+# Member counts follow the tree: N for renamed firmware, N+2 with the txcap pair.
 N=$(members "$B")
 # shellcheck disable=SC2034  # used in check conditions
 N2=$((N + 2))
 # Mocked identities. OTHER_MAC is a model with neither the txcap nor the Bluetooth quirk.
-OTHER_MAC=(env "MOCK_MODEL=MacBookPro15,1")
-IMAC=(env "MOCK_MODEL=iMac19,1" MOCK_IOREG=requested "MOCK_IOREG_NVRAM=$KAUAI_TXT" MOCK_IOREG_TXCAP=kauai-X3.txcb)
-IMAC_NOIOREG=(env "MOCK_MODEL=iMac19,1" MOCK_IOREG=none)
-IMAC_BADIOREG=(env "MOCK_MODEL=iMac19,1" MOCK_IOREG=requested MOCK_IOREG_NVRAM=P-nosuch-X9_M-ZZZZ_V-u__m-0.0.txt MOCK_IOREG_TXCAP=nosuch-X9.txcb)
+# Each Mac has a macOS version, since off macOS there is no real sw_vers to fall back on.
+OTHER_MAC=(env "MOCK_MODEL=MacBookPro15,1" MOCK_MACOS_VERSION=15.0)
+IMAC=(env "MOCK_MODEL=iMac19,1" MOCK_MACOS_VERSION=15.0 MOCK_IOREG=requested "MOCK_IOREG_NVRAM=$KAUAI_TXT" MOCK_IOREG_TXCAP=kauai-X3.txcb)
+IMAC_NOIOREG=(env "MOCK_MODEL=iMac19,1" MOCK_MACOS_VERSION=15.0 MOCK_IOREG=none)
+IMAC_BADIOREG=(env "MOCK_MODEL=iMac19,1" MOCK_MACOS_VERSION=15.0 MOCK_IOREG=requested MOCK_IOREG_NVRAM=P-nosuch-X9_M-ZZZZ_V-u__m-0.0.txt MOCK_IOREG_TXCAP=nosuch-X9.txcb)
 BT_OLD_MACOS=(env "MOCK_MODEL=MacBookPro16,3" MOCK_MACOS_VERSION=11.7.10)
 OTHER_OLD_MACOS=(env "MOCK_MODEL=MacBookPro15,1" MOCK_MACOS_VERSION=11.7.10)
 LINUX_IMAC=(env "MOCK_DMI_MODEL=iMac19,1")
@@ -153,10 +176,13 @@ LINUX_BT=(env "MOCK_DMI_MODEL=MacBookPro16,3")
 # The no-argument export cases run with HOME pointed at scratch; the real default
 # output must come through untouched, whether or not it exists.
 REAL_EXPORT="$HOME/Downloads/apple-firmware-export/firmware.tar"
-real_export_stat() { stat -f '%m %z' "$REAL_EXPORT" 2>/dev/null || echo absent; }
+real_export_stat() {
+	python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(s.st_mtime_ns, s.st_size)' "$REAL_EXPORT" 2>/dev/null || echo absent
+}
 # shellcheck disable=SC2034  # used in a check condition
 REAL_EXPORT_BEFORE=$(real_export_stat)
 echo "firmware tree: $SRC ($N renamed members); scratch: $S"
+echo "tar: $(tar --version | head -1)"
 
 echo "== macOS on MacBookPro15,1 (mocked system_profiler) =="
 run M1-help              0 "FIRMWARE_SRC"                  "" "" "$MM" "${OTHER_MAC[@]}" bash firmware.sh -h
@@ -190,7 +216,11 @@ echo "== macOS on this Mac (real system_profiler) =="
 # The one case with this Mac's own identity. export_local refuses to write an archive that
 # lacks what the model needs, so success is the expectation on any Mac; on iMac19,1,
 # iMac19,2 and iMacPro1,1 it takes a pair named by the real ioreg.
-run H1-this-mac-export   0 "successfully saved"            "" "" ""  bash firmware.sh export_local "$OUT/this-mac"
+if [ "$(uname -s)" = Darwin ]; then
+	run H1-this-mac-export 0 "successfully saved"          "" "" ""  bash firmware.sh export_local "$OUT/this-mac"
+else
+	skip=$((skip+1)); echo "SKIP H1-this-mac-export: needs macOS"
+fi
 
 echo "== macOS on iMac19,1 (mocked system_profiler/ioreg) =="
 run X1-imac-export       0 "successfully saved"            "" "" "$MM" "${IMAC[@]}" bash firmware.sh export_local "$OUT/imac-ok"
@@ -243,7 +273,7 @@ run L18-renamed-dotslash-tar 0 "Firmware installation complete" "$F/renamed-dots
 run L19-renamed-tar-gz   0 "Firmware installation complete" "$B" "" "$ML" bash firmware.sh -i install_local "$F/renamed.tar.gz"
 run L24-renamed-tgz      0 "Firmware installation complete" "$B" "" "$ML" bash firmware.sh -i install_local "$F/renamed.tgz"
 # Only brcmfmac is reloaded on a model that does not use the Bluetooth firmware.
-sudo_sequence L6-renamed-tar "mkdir -p /lib/firmware/brcm" "tar -xC /lib/firmware/brcm -f *" "modprobe -r brcmfmac_wcc" "modprobe -r brcmfmac" "modprobe brcmfmac"
+sudo_sequence L6-renamed-tar "${MKDIR[@]}" "tar -xC /lib/firmware/brcm -f *" "modprobe -r brcmfmac_wcc" "modprobe -r brcmfmac" "modprobe brcmfmac"
 # A driver that could not be reloaded is reported and fails the run. The files are
 # installed by then, so the tar has run. Unloading brcmfmac_wcc may fail (older kernels lack it).
 run L20-wifi-load-fails  1 "brcmfmac could not be"         "$B" "" "$ML" env SUDO_FAIL="modprobe brcmfmac" bash firmware.sh -i install_local "$B"
@@ -251,7 +281,7 @@ check L20-no-done            '! grep -q "Done!" "$OUT/L20-wifi-load-fails.out"'
 check L20-modprobe-error-shown 'grep -q "FATAL: Module brcmfmac" "$OUT/L20-wifi-load-fails.out"'
 run L21-wifi-unload-fails 1 "brcmfmac could not be"        "$B" "" "$ML" env SUDO_FAIL="modprobe -r brcmfmac" bash firmware.sh -i install_local "$B"
 check L21-no-done            '! grep -q "Done!" "$OUT/L21-wifi-unload-fails.out"'
-sudo_sequence L21-wifi-unload-fails "mkdir -p /lib/firmware/brcm" "tar -xC /lib/firmware/brcm -f *" "modprobe -r brcmfmac_wcc" "modprobe -r brcmfmac"
+sudo_sequence L21-wifi-unload-fails "${MKDIR[@]}" "tar -xC /lib/firmware/brcm -f *" "modprobe -r brcmfmac_wcc" "modprobe -r brcmfmac"
 run L22-wcc-unload-fails 0 "Firmware installation complete" "$B" "" "$ML" env SUDO_FAIL="modprobe -r brcmfmac_wcc" bash firmware.sh -i install_local "$B"
 # hci_bcm4377 is not touched on the other models, so its absence from the kernel cannot fail them.
 run L23-bt-fails-other-model 0 "Firmware installation complete" "$B" "" "$ML" env SUDO_FAIL="modprobe hci_bcm4377" bash firmware.sh -i install_local "$B"
@@ -259,7 +289,7 @@ check L23-no-bt-reload       '! grep -q hci_bcm4377 "$OUT/L23-bt-fails-other-mod
 
 echo "== Linux on MacBookPro16,3 (mocked DMI read) =="
 run B1-bt-model-installs 0 "Firmware installation complete" "$B" "" "$ML" "${LINUX_BT[@]}" bash firmware.sh -i install_local "$B"
-sudo_sequence B1-bt-model-installs "mkdir -p /lib/firmware/brcm" "tar -xC /lib/firmware/brcm -f *" "modprobe -r brcmfmac_wcc" "modprobe -r brcmfmac" "modprobe brcmfmac" "modprobe -r hci_bcm4377" "modprobe hci_bcm4377"
+sudo_sequence B1-bt-model-installs "${MKDIR[@]}" "tar -xC /lib/firmware/brcm -f *" "modprobe -r brcmfmac_wcc" "modprobe -r brcmfmac" "modprobe brcmfmac" "modprobe -r hci_bcm4377" "modprobe hci_bcm4377"
 run B2-bt-load-fails     1 "hci_bcm4377 could not be"      "$B" "" "$ML" "${LINUX_BT[@]}" SUDO_FAIL="modprobe hci_bcm4377" bash firmware.sh -i install_local "$B"
 check B2-no-done             '! grep -q "Done!" "$OUT/B2-bt-load-fails.out"'
 check B2-wifi-still-reloaded 'grep -qx "sudo: modprobe brcmfmac" "$OUT/B2-bt-load-fails.sudo"'
@@ -285,5 +315,5 @@ run I14-dir-symlink-pair 1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML"
 # Refused by the renamer, not the txcap guard: the archive was never accepted as renamed.
 run I15-nested-bin-tar   1 "no Wi-Fi firmware found"       "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/nested-bin.tar"
 
-echo "== $pass passed, $fail failed =="
+echo "== $pass passed, $fail failed, $skip skipped =="
 [ "$fail" = 0 ]
