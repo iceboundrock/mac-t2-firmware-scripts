@@ -1,0 +1,33 @@
+name: real tree
+
+# The suite against the runner's own /usr/share/firmware, which GitHub's macOS images
+# ship. That tree changes when the image's macOS does, with no commit here, so this runs
+# on a schedule rather than on every pull request: a run that fails on a commit an
+# earlier run passed on means the runner's macOS brought names or a shape the renamer or
+# the harness does not handle. Pull requests run it only when they change this file.
+on:
+  schedule:
+    # Mondays, off the hour: GitHub delays, and under load drops, scheduled runs at the
+    # top of the hour.
+    - cron: '37 5 * * 1'
+  # For a branch: gh workflow run real-tree.yml --ref <branch>
+  workflow_dispatch:
+  pull_request:
+    paths: [.github/workflows/real-tree.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    # Follows the label, so a move to the next macOS reaches this job without a change
+    # here; sw_vers says which release a run read.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: sw_vers
+      # FIRMWARE_SRC stays unset, so the export_local cases also go through firmware.sh's
+      # /usr/share/firmware default. Do not upload the scratch directory run.sh keeps when
+      # a check fails: it holds copies of Apple's firmware.
+      - name: bash tests/run.sh against /usr/share/firmware
+        run: bash tests/run.sh
