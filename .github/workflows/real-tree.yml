@@ -3,8 +3,9 @@ name: real tree
 # The suite against the runner's own /usr/share/firmware, which GitHub's macOS images
 # ship. That tree changes when the image's macOS does, with no commit here, so this runs
 # on a schedule rather than on every pull request: a run that fails on a commit an
-# earlier run passed on means the runner's macOS brought names or a shape the renamer or
-# the harness does not handle. Pull requests run it only when they change this file.
+# earlier run passed on means the image changed under it, most likely its macOS and with
+# it the tree, though python3 and tar come from the image too. Pull requests run it only
+# when they change this file.
 on:
   schedule:
     # Mondays, off the hour: GitHub delays, and under load drops, scheduled runs at the
