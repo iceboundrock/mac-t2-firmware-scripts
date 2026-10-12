@@ -14,7 +14,10 @@
 # archive was built from. With --synthetic the tree is a stand-in from synth-tree.sh,
 # written into the scratch directory, so the suite runs without Apple's tree, which
 # cannot be checked in. --synthetic and FIRMWARE_SRC each pick the tree, so the two
-# together exit 2 with the usage, as does any other argument.
+# together exit 2 with the usage, as does any other argument. The A cases check that by
+# starting this script again; a run.sh started from inside another stops once its
+# arguments are accepted and says which tree it would read, so none of them can start a
+# second suite.
 #
 # Needs bash and python3, and runs on macOS or Linux; on Linux the cases run GNU tar
 # instead of bsdtar. Only H1 depends on the host: the other macOS cases take their model
@@ -40,6 +43,13 @@ case "$#:${1-}" in
 esac
 [ -z "$synthetic" ] || [ -z "${FIRMWARE_SRC-}" ] ||
 	usage "--synthetic writes its own tree, but FIRMWARE_SRC names $FIRMWARE_SRC"
+# Started from another run.sh, as by the A cases: without this stop, A5 would recurse.
+if [ -n "${RUN_SH_PARENT-}" ]; then
+	if [ -n "$synthetic" ]; then tree="a synthetic tree"; else tree=${FIRMWARE_SRC:-/usr/share/firmware}; fi
+	echo "run.sh: started from run.sh $RUN_SH_PARENT, so stopping here; would read $tree"
+	exit 0
+fi
+export RUN_SH_PARENT=$$
 TESTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$TESTS")
 # firmware.sh calls rename_firmware.py by relative path, so it is run from the repo.
@@ -324,6 +334,16 @@ run I13-renamed-empty-txcap 1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$
 run I14-dir-symlink-pair 1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/rawtree-symlink-txcap"
 # Refused by the renamer, not the txcap guard: the archive was never accepted as renamed.
 run I15-nested-bin-tar   1 "no Wi-Fi firmware found"       "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/nested-bin.tar"
+
+echo "== tests/run.sh arguments (nested, so each stops before its suite) =="
+# Each case sets FIRMWARE_SRC itself rather than inherit this run's.
+run A1-unknown-arg       2 "usage: bash tests/run.sh"      "" "" "" env -u FIRMWARE_SRC bash tests/run.sh --bogus
+run A2-empty-arg         2 "usage: bash tests/run.sh"      "" "" "" env -u FIRMWARE_SRC bash tests/run.sh ""
+run A3-extra-arg         2 "usage: bash tests/run.sh"      "" "" "" env -u FIRMWARE_SRC bash tests/run.sh --synthetic extra
+run A4-synthetic-and-src 2 "--synthetic writes its own tree" "" "" "" env FIRMWARE_SRC=/elsewhere bash tests/run.sh --synthetic
+# An empty FIRMWARE_SRC counts as unset, as in firmware.sh.
+run A5-synthetic-empty-src 0 "would read a synthetic tree" "" "" "" env FIRMWARE_SRC= bash tests/run.sh --synthetic
+run A6-src               0 "would read /elsewhere$"        "" "" "" env FIRMWARE_SRC=/elsewhere bash tests/run.sh
 
 echo "== $pass passed, $fail failed, $skip skipped =="
 [ "$fail" = 0 ]
