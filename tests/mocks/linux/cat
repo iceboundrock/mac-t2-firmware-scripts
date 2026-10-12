@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Stands in for /sys/class/dmi/id/product_name, which firmware.sh reads for the model
+# on Linux. MOCK_DMI_MODEL is the model identifier to report; left unset, the read
+# fails as it does on a Mac and firmware.sh sees an empty model. Everything else goes
+# to the real cat, including the heredocs firmware.sh prints with it.
+if [ "$1" = "/sys/class/dmi/id/product_name" ] && [ -n "${MOCK_DMI_MODEL-}" ]; then
+	echo "$MOCK_DMI_MODEL"
+else
+	exec /bin/cat "$@"
+fi

@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# Runs firmware.sh through its macOS path for real and through its Linux path with
+# uname, sudo and the DMI model read replaced by the scripts in mocks/. Each case checks
+# the exit code, a message, what would have been handed to sudo, and that no temp
+# directory was left behind. build-fixtures.sh makes the inputs from this Mac's
+# /usr/share/firmware at run time; nothing proprietary is checked in. On failure the
+# case's output is printed. Everything is written under one mktemp directory that is
+# removed at exit.
+#
+# Needs a Mac with /usr/share/firmware, bash and python3. The unmocked macOS cases assume
+# this Mac is not iMac19,1, iMac19,2 or iMacPro1,1; those models are exercised through
+# mocked system_profiler/ioreg on macOS and a mocked DMI read on Linux.
+#
+# Usage: bash tests/run.sh
+
+TESTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(dirname "$TESTS")
+# firmware.sh calls rename_firmware.py by relative path, so it is run from the repo.
+cd "$REPO" || exit 2
+
+S=$(mktemp -d) || exit 2
+trap '[ -n "$S" ] && rm -rf "$S"' EXIT
+F="$S/fixtures"; OUT="$S/out"; H="$S/home"
+mkdir -p "$OUT" "$H"
+bash "$TESTS/build-fixtures.sh" "$F" || exit 2
+
+# macOS mktemp uses _CS_DARWIN_USER_TEMP_DIR before TMPDIR, so the leftover check
+# watches the directory it really uses for tmp.* entries that appear during a case.
+MKTMP=$(dirname "$(mktemp -u -d)")
+pass=0; fail=0
+
+members() { tar -tf "$1" | wc -l | tr -d ' '; }
+has_member() { tar -tf "$1" | grep -qx "$2"; }
+
+# run <name> <exit> <pattern> <members> <stdin> <path-prefix> <cmd>...
+#   exit      expected exit code
+#   pattern   must appear in the combined stdout/stderr
+#   members   "-": nothing may run under sudo (the input was refused);
+#             a number: sudo must run exactly "mkdir -p /lib/firmware/brcm" then a tar
+#             with that many members (the directory never exists on a Mac, so the
+#             mkdir is always seen); "": no sudo check (macOS cases)
+#   stdin     fed to the command (the prompted-path case)
+#   prefix    directory put first on PATH ("" for none)
+# The output goes to $OUT/<name>.out and the sudo log to $OUT/<name>.sudo for later
+# checks.
+run() {
+	local name=$1 want_exit=$2 pattern=$3 want_members=$4 stdin=$5 prefix=$6; shift 6
+	export SUDO_LOG="$OUT/$name.sudo"; : > "$SUDO_LOG"
+	local out status before ok=1 why=""
+	before=$(ls -d "$MKTMP"/tmp.* 2>/dev/null)
+	if [ -n "$prefix" ]; then
+		out=$(printf '%s\n' "$stdin" | PATH="$prefix:$PATH" "$@" 2>&1); status=$?
+	else
+		out=$(printf '%s\n' "$stdin" | "$@" 2>&1); status=$?
+	fi
+	[ "$status" = "$want_exit" ] || { ok=0; why+=" exit=$status(want $want_exit)"; }
+	grep -q -- "$pattern" <<< "$out" || { ok=0; why+=" missing-pattern"; }
+	if [ "$want_members" = "-" ]; then
+		[ ! -s "$SUDO_LOG" ] || { ok=0; why+=" sudo-ran:$(head -1 "$SUDO_LOG" | cut -d' ' -f2-)"; }
+	elif [ -n "$want_members" ]; then
+		grep -q "^sudo-tar-members: $want_members$" "$SUDO_LOG" || { ok=0; why+=" members=$(grep sudo-tar-members "$SUDO_LOG" | cut -d' ' -f2)(want $want_members)"; }
+		if ! { [ "$(sed -n 1p "$SUDO_LOG")" = "sudo: mkdir -p /lib/firmware/brcm" ] && sed -n 2p "$SUDO_LOG" | grep -q '^sudo: tar'; }; then
+			ok=0; why+=" sudo-order:$(cut -d' ' -f2 "$SUDO_LOG" | tr '\n' ,)"
+		fi
+	fi
+	[ "$(ls -d "$MKTMP"/tmp.* 2>/dev/null)" = "$before" ] || { ok=0; why+=" tmp-left:$(comm -13 <(echo "$before") <(ls -d "$MKTMP"/tmp.* 2>/dev/null) | tr '\n' ,)"; }
+	printf '%s\n' "$out" > "$OUT/$name.out"
+	if [ $ok = 1 ]; then
+		pass=$((pass+1)); echo "PASS $name"
+	else
+		fail=$((fail+1)); echo "FAIL $name:$why"
+		sed 's/^/    | /' <<< "$out"
+		[ -s "$SUDO_LOG" ] && sed 's/^/    | /' "$SUDO_LOG"
+	fi
+}
+# check <name> <condition>: the condition is evaluated in this shell.
+check() {
+	if eval "$2"; then pass=$((pass+1)); echo "PASS $1"; else fail=$((fail+1)); echo "FAIL $1"; fi
+}
+# installed_members <case> <member>...: each must be a top-level member of the tar handed to sudo.
+installed_members() {
+	local name=$1 m ok=1; shift
+	for m in "$@"; do grep -qxE "(\./)?$m" "$OUT/$name.sudo.members" || { ok=0; echo "FAIL $name: $m not handed to sudo tar"; }; done
+	if [ $ok = 1 ]; then pass=$((pass+1)); echo "PASS $name:members"; else fail=$((fail+1)); fi
+}
+# not_installed_members <case> <member>...: none may reach sudo tar.
+not_installed_members() {
+	local name=$1 m ok=1; shift
+	for m in "$@"; do grep -qxE "(\./)?$m" "$OUT/$name.sudo.members" && { ok=0; echo "FAIL $name: $m handed to sudo tar"; }; done
+	if [ $ok = 1 ]; then pass=$((pass+1)); echo "PASS $name:not-members"; else fail=$((fail+1)); fi
+}
+# sudo_sequence <case> <cmd>...: the sudo log must hold exactly these commands in this order (glob patterns).
+sudo_sequence() {
+	local name=$1 ok=1 i=0 line want; shift
+	local -a got=()
+	while IFS= read -r line; do got+=("${line#sudo: }"); done < <(grep '^sudo: ' "$OUT/$name.sudo")
+	[ ${#got[@]} = $# ] || ok=0
+	# shellcheck disable=SC2053  # the right-hand side is a glob on purpose
+	for want in "$@"; do [[ "${got[i]-}" == $want ]] || ok=0; i=$((i+1)); done
+	if [ $ok = 1 ]; then pass=$((pass+1)); echo "PASS $name:sudo-sequence"; else fail=$((fail+1)); echo "FAIL $name:sudo-sequence got: $(printf '%s | ' "${got[@]-}")"; fi
+}
+
+ML="$TESTS/mocks/linux"; MM="$TESTS/mocks/macos"
+TXT=brcmfmac4364b2-pcie.txt; BLOB=brcmfmac4364b2-pcie.txcap_blob
+SRC=/usr/share/firmware; SRC4364="$SRC/wifi/C-4364__s-B2"
+KAUAI_TXT=$(cat "$F/kauai-txt-name")
+sha() { shasum -a 256 | cut -d' ' -f1; }
+# shellcheck disable=SC2034  # used in check conditions
+KAUAI_TXT_SHA=$(sha < "$SRC4364/$KAUAI_TXT")
+# shellcheck disable=SC2034
+KAUAI_TXCB_SHA=$(sha < "$SRC4364/kauai-X3.txcb")
+B="$F/renamed.tar"
+# Member counts follow this Mac's tree: N for renamed firmware, N+2 with the txcap pair.
+N=$(members "$B"); N2=$((N + 2))
+# Mocked identities.
+IMAC=(env "MOCK_MODEL=iMac19,1" MOCK_IOREG=requested "MOCK_IOREG_NVRAM=$KAUAI_TXT" MOCK_IOREG_TXCAP=kauai-X3.txcb)
+IMAC_NOIOREG=(env "MOCK_MODEL=iMac19,1" MOCK_IOREG=none)
+IMAC_BADIOREG=(env "MOCK_MODEL=iMac19,1" MOCK_IOREG=requested MOCK_IOREG_NVRAM=P-nosuch-X9_M-ZZZZ_V-u__m-0.0.txt MOCK_IOREG_TXCAP=nosuch-X9.txcb)
+BT_OLD_MACOS=(env "MOCK_MODEL=MacBookPro16,3" MOCK_MACOS_VERSION=11.7.10)
+OTHER_OLD_MACOS=(env "MOCK_MODEL=MacBookPro15,1" MOCK_MACOS_VERSION=11.7.10)
+LINUX_IMAC=(env "MOCK_DMI_MODEL=iMac19,1")
+LINUX_BT=(env "MOCK_DMI_MODEL=MacBookPro16,3")
+# The no-argument export cases run with HOME pointed at scratch; the real default
+# output must come through untouched, whether or not it exists.
+REAL_EXPORT="$HOME/Downloads/apple-firmware-export/firmware.tar"
+real_export_stat() { stat -f '%m %z' "$REAL_EXPORT" 2>/dev/null || echo absent; }
+# shellcheck disable=SC2034  # used in a check condition
+REAL_EXPORT_BEFORE=$(real_export_stat)
+echo "firmware tree: $SRC ($N renamed members); scratch: $S"
+
+echo "== macOS (real uname) =="
+run M1-help              0 "FIRMWARE_SRC"                  "" "" ""  bash firmware.sh -h
+run M2-i-no-subcmd       0 "successfully saved"            "" "" ""  env HOME="$H" bash firmware.sh -i
+run M3-no-subcmd         0 "successfully saved"            "" "" ""  env HOME="$H" bash firmware.sh
+run M4-export_local      0 "successfully saved"            "" "" ""  bash firmware.sh export_local "$OUT/export"
+run M5-create_archive-gone 1 "Invalid option"              "" "" ""  bash firmware.sh create_archive
+run M6-rename_only-gone  1 "Invalid option"                "" "" ""  bash firmware.sh rename_only "$F/emptydir" "$OUT/x.tar"
+run M7-src-empty         1 "no Wi-Fi firmware found"       "" "" ""  env FIRMWARE_SRC="$F/emptydir" bash firmware.sh export_local "$OUT/ov-empty"
+run M8-src-missing       1 "is not a directory"            "" "" ""  env FIRMWARE_SRC="$F/nonexistent" bash firmware.sh export_local "$OUT/ov-none"
+run M9-src-override      0 "from $F/rawtree-txcap"         "" "" ""  env FIRMWARE_SRC="$F/rawtree-txcap" bash firmware.sh export_local "$OUT/ov-tree"
+check M10-default-dir-N      '[ "$(members "$H/Downloads/apple-firmware-export/firmware.tar")" = "$N" ]'
+# export_local on this Mac adds nothing to what the renamer produced.
+check M11-export-eq-renamer  'diff <(tar -tf "$OUT/export/firmware.tar") <(tar -tf "$B") >/dev/null'
+check M12-override-keeps-pair '[ "$(members "$OUT/ov-tree/firmware.tar")" = "$N2" ] && has_member "$OUT/ov-tree/firmware.tar" $TXT && has_member "$OUT/ov-tree/firmware.tar" $BLOB'
+check M13-empty-src-no-tar   '[ ! -e "$OUT/ov-empty/firmware.tar" ]'
+check M14-real-home-untouched '[ "$(real_export_stat)" = "$REAL_EXPORT_BEFORE" ]'
+# The output directory may be relative to the repo, which is where the script is run from.
+RELOUT=$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$OUT/rel-out" "$REPO")
+run M15-relative-outdir  0 "successfully saved"            "" "" ""  bash firmware.sh export_local "$RELOUT"
+check M16-relative-outdir-N  '[ "$(members "$OUT/rel-out/firmware.tar")" = "$N" ]'
+# A root pair that is only symlinks is not carried over; tar would store it as links.
+run M17-src-symlink-pair 0 "successfully saved"            "" "" ""  env FIRMWARE_SRC="$F/rawtree-symlink-txcap" bash firmware.sh export_local "$OUT/ov-symlink"
+check M18-symlink-pair-not-carried '[ "$(members "$OUT/ov-symlink/firmware.tar")" = "$N" ] && ! has_member "$OUT/ov-symlink/firmware.tar" $TXT'
+
+echo "== macOS on iMac19,1 (mocked system_profiler/ioreg) =="
+run X1-imac-export       0 "successfully saved"            "" "" "$MM" "${IMAC[@]}" bash firmware.sh export_local "$OUT/imac-ok"
+check X2-imac-export-N2      '[ "$(members "$OUT/imac-ok/firmware.tar")" = "$N2" ]'
+check X3-imac-pair-top-level 'has_member "$OUT/imac-ok/firmware.tar" $TXT && has_member "$OUT/imac-ok/firmware.tar" $BLOB'
+check X4-imac-picked-ioreg-files '[ "$(tar -xOf "$OUT/imac-ok/firmware.tar" $BLOB | sha)" = "$KAUAI_TXCB_SHA" ] && [ "$(tar -xOf "$OUT/imac-ok/firmware.tar" $TXT | sha)" = "$KAUAI_TXT_SHA" ]'
+run X5-imac-verbose      0 "successfully saved"            "" "" "$MM" "${IMAC[@]}" bash firmware.sh -v export_local "$OUT/imac-v"
+check X6-imac-verbose-N2     '[ "$(members "$OUT/imac-v/firmware.tar")" = "$N2" ]'
+run X7-imac-default-subcmd 0 "successfully saved"          "" "" "$MM" "${IMAC[@]}" HOME="$H" bash firmware.sh -i
+check X8-imac-default-N2     '[ "$(members "$H/Downloads/apple-firmware-export/firmware.tar")" = "$N2" ]'
+run X9-imac-no-ioreg     1 "Could not read this Mac's NVRAM and txcap file names" "" "" "$MM" "${IMAC_NOIOREG[@]}" bash firmware.sh export_local "$OUT/imac-noioreg"
+check X10-no-ioreg-no-tar    '[ ! -e "$OUT/imac-noioreg/firmware.tar" ]'
+run X11-imac-bad-ioreg   1 "has no such file"              "" "" "$MM" "${IMAC_BADIOREG[@]}" bash firmware.sh export_local "$OUT/imac-bad"
+check X12-bad-ioreg-no-tar   '[ ! -e "$OUT/imac-bad/firmware.tar" ]'
+run X13-imac-src-other-mac 1 "has no such file"            "" "" "$MM" "${IMAC[@]}" FIRMWARE_SRC="$F/rawtree-no4364b2" bash firmware.sh export_local "$OUT/imac-other"
+check X14-src-other-mac-no-tar '[ ! -e "$OUT/imac-other/firmware.tar" ]'
+# A failed export leaves an earlier firmware.tar in the output directory as it was.
+mkdir -p "$OUT/imac-keep"; cp "$F/renamed-with-txcap.tar" "$OUT/imac-keep/firmware.tar"
+run X15-imac-failed-export 1 "Could not read"              "" "" "$MM" "${IMAC_NOIOREG[@]}" bash firmware.sh export_local "$OUT/imac-keep"
+check X16-earlier-tar-kept   '[ "$(members "$OUT/imac-keep/firmware.tar")" = "$N2" ]'
+check X17-no-cwd-leftover    '[ ! -e "$REPO/$TXT" ] && [ ! -e "$REPO/$BLOB" ]'
+run X18-imac-no-ioreg-i  1 "Could not read"                "" "" "$MM" "${IMAC_NOIOREG[@]}" HOME="$H" bash firmware.sh -i
+
+echo "== macOS before Monterey (mocked sw_vers/system_profiler) =="
+# The Bluetooth warning is for the three models that use the Bluetooth firmware, and only them.
+run X19-bt-model-old-macos 0 "earlier than macOS Monterey" "" "" "$MM" "${BT_OLD_MACOS[@]}" bash firmware.sh export_local "$OUT/bt-old"
+run X20-other-model-old-macos 0 "successfully saved"       "" "" "$MM" "${OTHER_OLD_MACOS[@]}" bash firmware.sh export_local "$OUT/other-old"
+check X20-no-bluetooth-warning '! grep -q "earlier than macOS Monterey" "$OUT/X20-other-model-old-macos.out"'
+
+echo "== Linux (mocked uname/sudo) =="
+run L1-i-no-subcmd       1 "needs the path"                "-" "" "$ML" bash firmware.sh -i
+run L2-prompted-path     0 "Firmware installation complete" "$N" "$B" "$ML" bash firmware.sh
+run L3-emptydir          1 "no Wi-Fi firmware found"       "-" "" "$ML" bash firmware.sh -i install_local "$F/emptydir"
+run L4-junkdir           1 "no Wi-Fi firmware found"       "-" "" "$ML" bash firmware.sh -i install_local "$F/junkdir"
+run L5-dir               0 "Firmware installation complete" "$N" "" "$ML" bash firmware.sh -i install_local "$SRC"
+run L6-renamed-tar       0 "Firmware installation complete" "$N" "" "$ML" bash firmware.sh -i install_local "$B"
+run L7-raw-tar           0 "Firmware installation complete" "$N" "" "$ML" bash firmware.sh -i install_local "$F/raw.tar"
+run L8-raw-tar-gz        0 "Firmware installation complete" "$N" "" "$ML" bash firmware.sh -i install_local "$F/raw.tar.gz"
+run L9-raw-tar-txcap-root 0 "Firmware installation complete" "$N2" "" "$ML" bash firmware.sh -i install_local "$F/raw-with-txcap-root.tar"
+installed_members L9-raw-tar-txcap-root $TXT $BLOB
+run L10-missing-path     1 "does not exist"                "-" "" "$ML" bash firmware.sh -i install_local "$F/nonexistent"
+run L11-bad-format       1 "Unsupported file format"       "-" "" "$ML" bash firmware.sh -i install_local "$F/junkdir/readme.md"
+run L12-legacy-tgz-txcap 0 "Firmware installation complete" "$N2" "" "$ML" bash firmware.sh -i install_local "$F/legacy-txcap.tar.gz"
+installed_members L12-legacy-tgz-txcap $TXT $BLOB
+run L13-dir-txcap-root   0 "Firmware installation complete" "$N2" "" "$ML" bash firmware.sh -i install_local "$F/rawtree-txcap"
+installed_members L13-dir-txcap-root $TXT $BLOB
+run L14-dir-symlink-pair 0 "Firmware installation complete" "$N" "" "$ML" bash firmware.sh -i install_local "$F/rawtree-symlink-txcap"
+not_installed_members L14-dir-symlink-pair $TXT $BLOB
+# A tar counts as renamed only if extracting it leaves a usable brcmfmac*.bin at the top level.
+run L15-nested-bin-tar   1 "no Wi-Fi firmware found"       "-" "" "$ML" bash firmware.sh -i install_local "$F/nested-bin.tar"
+run L16-empty-bin-tar    1 "no Wi-Fi firmware found"       "-" "" "$ML" bash firmware.sh -i install_local "$F/empty-bin.tar"
+run L17-symlink-bin-tar  1 "no Wi-Fi firmware found"       "-" "" "$ML" bash firmware.sh -i install_local "$F/symlink-bin.tar"
+run L18-renamed-dotslash-tar 0 "Firmware installation complete" "$(members "$F/renamed-dotslash.tar")" "" "$ML" bash firmware.sh -i install_local "$F/renamed-dotslash.tar"
+run L19-renamed-tar-gz   0 "Firmware installation complete" "$N" "" "$ML" bash firmware.sh -i install_local "$F/renamed.tar.gz"
+# Only brcmfmac is reloaded on a model that does not use the Bluetooth firmware.
+sudo_sequence L6-renamed-tar "mkdir -p /lib/firmware/brcm" "tar -xC /lib/firmware/brcm -f *" "modprobe -r brcmfmac_wcc" "modprobe -r brcmfmac" "modprobe brcmfmac"
+# A driver that could not be reloaded is reported and fails the run. The files are
+# installed by then, so the tar has run. Unloading brcmfmac_wcc may fail (older kernels lack it).
+run L20-wifi-load-fails  1 "brcmfmac could not be"         "$N" "" "$ML" env SUDO_FAIL="modprobe brcmfmac" bash firmware.sh -i install_local "$B"
+check L20-no-done            '! grep -q "Done!" "$OUT/L20-wifi-load-fails.out"'
+check L20-modprobe-error-shown 'grep -q "FATAL: Module brcmfmac" "$OUT/L20-wifi-load-fails.out"'
+run L21-wifi-unload-fails 1 "brcmfmac could not be"        "$N" "" "$ML" env SUDO_FAIL="modprobe -r brcmfmac" bash firmware.sh -i install_local "$B"
+check L21-no-done            '! grep -q "Done!" "$OUT/L21-wifi-unload-fails.out"'
+sudo_sequence L21-wifi-unload-fails "mkdir -p /lib/firmware/brcm" "tar -xC /lib/firmware/brcm -f *" "modprobe -r brcmfmac_wcc" "modprobe -r brcmfmac"
+run L22-wcc-unload-fails 0 "Firmware installation complete" "$N" "" "$ML" env SUDO_FAIL="modprobe -r brcmfmac_wcc" bash firmware.sh -i install_local "$B"
+# hci_bcm4377 is not touched on the other models, so its absence from the kernel cannot fail them.
+run L23-bt-fails-other-model 0 "Firmware installation complete" "$N" "" "$ML" env SUDO_FAIL="modprobe hci_bcm4377" bash firmware.sh -i install_local "$B"
+check L23-no-bt-reload       '! grep -q hci_bcm4377 "$OUT/L23-bt-fails-other-model.sudo"'
+
+echo "== Linux on MacBookPro16,3 (mocked DMI read) =="
+run B1-bt-model-installs 0 "Firmware installation complete" "$N" "" "$ML" "${LINUX_BT[@]}" bash firmware.sh -i install_local "$B"
+sudo_sequence B1-bt-model-installs "mkdir -p /lib/firmware/brcm" "tar -xC /lib/firmware/brcm -f *" "modprobe -r brcmfmac_wcc" "modprobe -r brcmfmac" "modprobe brcmfmac" "modprobe -r hci_bcm4377" "modprobe hci_bcm4377"
+run B2-bt-load-fails     1 "hci_bcm4377 could not be"      "$N" "" "$ML" "${LINUX_BT[@]}" SUDO_FAIL="modprobe hci_bcm4377" bash firmware.sh -i install_local "$B"
+check B2-no-done             '! grep -q "Done!" "$OUT/B2-bt-load-fails.out"'
+check B2-wifi-still-reloaded 'grep -qx "sudo: modprobe brcmfmac" "$OUT/B2-bt-load-fails.sudo"'
+run B3-bt-unload-fails   1 "hci_bcm4377 could not be"      "$N" "" "$ML" "${LINUX_BT[@]}" SUDO_FAIL="modprobe -r hci_bcm4377" bash firmware.sh -i install_local "$B"
+
+echo "== Linux on iMac19,1 (mocked DMI read) =="
+run I1-dir-no-txcap      1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$SRC"
+check I1-linux-hint          'grep -q export_local "$OUT/I1-dir-no-txcap.out"'
+run I2-renamed-no-txcap  1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$B"
+run I3-renamed-with-txcap 0 "Firmware installation complete" "$N2" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/renamed-with-txcap.tar"
+run I4-legacy-tgz-txcap  0 "Firmware installation complete" "$N2" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/legacy-txcap.tar.gz"
+installed_members I4-legacy-tgz-txcap $TXT $BLOB
+run I5-raw-tar-txcap-root 0 "Firmware installation complete" "$N2" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/raw-with-txcap-root.tar"
+installed_members I5-raw-tar-txcap-root $TXT $BLOB
+run I6-dir-txcap-root    0 "Firmware installation complete" "$N2" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/rawtree-txcap"
+installed_members I6-dir-txcap-root $TXT $BLOB
+run I7-renamed-blob-only 1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/renamed-blob-only.tar"
+run I8-renamed-txt-only  1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/renamed-txt-only.tar"
+run I9-renamed-nested-txcap 1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/renamed-nested-txcap.tar"
+run I10-raw-tar-gz-no-txcap 1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/raw.tar.gz"
+# The fake iMac19,1's own export (X1) installs on the fake iMac19,1.
+run I11-mac-export-installs 0 "Firmware installation complete" "$N2" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$OUT/imac-ok/firmware.tar"
+installed_members I11-mac-export-installs $TXT $BLOB
+run I12-renamed-symlink-txcap 1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/renamed-symlink-txcap.tar"
+run I13-renamed-empty-txcap 1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/renamed-empty-txcap.tar"
+run I14-dir-symlink-pair 1 "iMac19,1 needs brcmfmac4364b2-pcie.txt" "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/rawtree-symlink-txcap"
+# Refused by the renamer, not the txcap guard: the archive was never accepted as renamed.
+run I15-nested-bin-tar   1 "no Wi-Fi firmware found"       "-" "" "$ML" "${LINUX_IMAC[@]}" bash firmware.sh -i install_local "$F/nested-bin.tar"
+
+echo "== $pass passed, $fail failed =="
+[ "$fail" = 0 ]

@@ -76,6 +76,16 @@ usage: firmware.sh [-ivhx] [subcommand] [subcmd args]
 
 Flags: `-i` never prompt (`install_local` fails instead of asking for a path), `-v` verbose, `-x` trace with `set -x`, `-h` help. The subcommand is optional: with none, the script runs `export_local` on macOS and `install_local` on Linux.
 
+## Tests
+
+```sh
+bash tests/run.sh
+```
+
+This runs on a Mac with `/usr/share/firmware` and needs `bash` and `python3`. It builds its inputs from that tree at run time (nothing proprietary is checked in), runs `export_local` for real, and runs `install_local` with `uname`, `sudo` and the `/sys/class/dmi/id/product_name` read replaced by the scripts in `tests/mocks/`, so the Linux side can be checked on the Mac. Each case asserts the exit code, a message, what would have reached `sudo` (nothing for a refused input, the `mkdir` and a `tar` with the expected member count for an accepted one), and that no temp directory was left behind. The `txcap` and Bluetooth model paths are exercised as iMac19,1 and MacBookPro16,3 through mocked `system_profiler`, `ioreg`, `sw_vers` and DMI reads; the unmocked macOS cases assume the Mac running the tests is not one of iMac19,1, iMac19,2 or iMacPro1,1. Everything is written under one temporary directory that is removed at exit, and a failed case prints its output.
+
+Not covered: a real Linux `tar` (the mocks run macOS's bsdtar), real privilege, and whether `modprobe` reloads the driver on actual hardware.
+
 ## License
 
 MIT. See [LICENSE](LICENSE). The original authors' copyright notices from the upstream script are preserved there.

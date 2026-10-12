@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# MOCK_MODEL is the Model Identifier to report, printed in the shape of the real
+# SPHardwareDataType line firmware.sh greps for. Unset, the real system_profiler runs.
+if [ -n "${MOCK_MODEL-}" ]; then
+	echo "      Model Identifier: $MOCK_MODEL"
+else
+	exec /usr/sbin/system_profiler "$@"
+fi

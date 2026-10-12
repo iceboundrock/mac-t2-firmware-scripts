@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Makes firmware.sh take its Linux branch when run on macOS.
+if [ "$1" = "-s" ]; then echo Linux; else exec /usr/bin/uname "$@"; fi

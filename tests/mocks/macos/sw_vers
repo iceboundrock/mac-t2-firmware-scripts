@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# MOCK_MACOS_VERSION is what -productVersion reports. Unset, the real sw_vers runs.
+if [ "$1" = "-productVersion" ] && [ -n "${MOCK_MACOS_VERSION-}" ]; then
+	echo "$MOCK_MACOS_VERSION"
+else
+	exec /usr/bin/sw_vers "$@"
+fi
