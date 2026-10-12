@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# Runs firmware.sh through its macOS path for real and through its Linux path with
-# uname, sudo and the DMI model read replaced by the scripts in mocks/. Each case checks
-# the exit code, a message, what would have been handed to sudo, and that no temp
-# directory was left behind. build-fixtures.sh makes the inputs from this Mac's
+# Runs firmware.sh through its macOS path for real, as a model the scripts in
+# mocks/macos report, and through its Linux path with uname, sudo and the DMI model read
+# replaced by the scripts in mocks/linux. Each case checks the exit code, a message, what
+# would have been handed to sudo, and that every temp directory it made is gone
+# (mocks/common/mktemp records them). build-fixtures.sh makes the inputs from this Mac's
 # /usr/share/firmware at run time; nothing proprietary is checked in. Everything is
 # written under one mktemp directory. It is removed at exit when every check passed; a
 # failed case prints its output, and the directory is kept, with its path printed, so the
 # per-case output and sudo logs under out/ and the fixtures can be inspected.
 #
-# Needs a Mac with /usr/share/firmware, bash and python3. The unmocked macOS cases assume
-# this Mac is not iMac19,1, iMac19,2 or iMacPro1,1; those models are exercised through
-# mocked system_profiler/ioreg on macOS and a mocked DMI read on Linux.
+# Needs a Mac with /usr/share/firmware, bash and python3. Only H1 depends on which Mac
+# runs the suite: the other macOS cases take their model from the mocks, and the Linux
+# cases from the mocked DMI read or, without one, from the DMI file no Mac has. H1 exports
+# as this Mac and expects success; on iMac19,1, iMac19,2 and iMacPro1,1 that goes through
+# the real ioreg.
 #
 # Usage: bash tests/run.sh
 
@@ -33,10 +36,6 @@ F="$S/fixtures"; OUT="$S/out"; H="$S/home"
 mkdir -p "$OUT" "$H"
 bash "$TESTS/build-fixtures.sh" "$F" || exit 2
 
-# macOS mktemp uses _CS_DARWIN_USER_TEMP_DIR before TMPDIR, so the leftover check
-# watches the directory it really uses for tmp.* entries that appear during a case.
-MKTMP=$(dirname "$(mktemp -u -d)")
-
 members() { tar -tf "$1" | wc -l | tr -d ' '; }
 # members_eq <archive> <count>: true if the archive has that many members; says how many it has otherwise.
 members_eq() { local got; got=$(members "$1"); [ "$got" = "$2" ] || { echo "$1 has $got members, want $2"; return 1; }; }
@@ -50,19 +49,16 @@ has_member() { tar -tf "$1" | grep -qx "$2"; }
 #             with that many members (the directory never exists on a Mac, so the
 #             mkdir is always seen); "": no sudo check (macOS cases)
 #   stdin     fed to the command (the prompted-path case)
-#   prefix    directory put first on PATH ("" for none)
-# The output goes to $OUT/<name>.out and the sudo log to $OUT/<name>.sudo for later
-# checks.
+#   prefix    directory put first on PATH ("" for none), ahead of mocks/common
+# The output goes to $OUT/<name>.out, the sudo log to $OUT/<name>.sudo and the paths
+# mktemp created to $OUT/<name>.mktemp; each of those paths must be gone afterwards.
 run() {
 	local name=$1 want_exit=$2 pattern=$3 want_members=$4 stdin=$5 prefix=$6; shift 6
-	export SUDO_LOG="$OUT/$name.sudo"; : > "$SUDO_LOG"
-	local out status before ok=1 why=""
-	before=$(ls -d "$MKTMP"/tmp.* 2>/dev/null)
-	if [ -n "$prefix" ]; then
-		out=$(printf '%s\n' "$stdin" | PATH="$prefix:$PATH" "$@" 2>&1); status=$?
-	else
-		out=$(printf '%s\n' "$stdin" | "$@" 2>&1); status=$?
-	fi
+	export SUDO_LOG="$OUT/$name.sudo" MKTEMP_LOG="$OUT/$name.mktemp"
+	: > "$SUDO_LOG"; : > "$MKTEMP_LOG"
+	local out status left p ok=1 why="" path="$TESTS/mocks/common:$PATH"
+	[ -z "$prefix" ] || path="$prefix:$path"
+	out=$(printf '%s\n' "$stdin" | PATH="$path" "$@" 2>&1); status=$?
 	[ "$status" = "$want_exit" ] || { ok=0; why+=" exit=$status(want $want_exit)"; }
 	grep -q -- "$pattern" <<< "$out" || { ok=0; why+=" missing-pattern"; }
 	if [ "$want_members" = "-" ]; then
@@ -73,7 +69,8 @@ run() {
 			ok=0; why+=" sudo-order:$(cut -d' ' -f2 "$SUDO_LOG" | tr '\n' ,)"
 		fi
 	fi
-	[ "$(ls -d "$MKTMP"/tmp.* 2>/dev/null)" = "$before" ] || { ok=0; why+=" tmp-left:$(comm -13 <(echo "$before") <(ls -d "$MKTMP"/tmp.* 2>/dev/null) | tr '\n' ,)"; }
+	left=$(while IFS= read -r p; do [ ! -e "$p" ] || echo "$p"; done < "$MKTEMP_LOG")
+	[ -z "$left" ] || { ok=0; why+=" tmp-left:$(tr '\n' , <<< "$left")"; }
 	printf '%s\n' "$out" > "$OUT/$name.out"
 	if [ $ok = 1 ]; then
 		pass=$((pass+1)); echo "PASS $name"
@@ -135,7 +132,8 @@ KAUAI_TXCB_SHA=$(sha < "$SRC4364/kauai-X3.txcb")
 B="$F/renamed.tar"
 # Member counts follow this Mac's tree: N for renamed firmware, N+2 with the txcap pair.
 N=$(members "$B"); N2=$((N + 2))
-# Mocked identities.
+# Mocked identities. OTHER_MAC is a model with neither the txcap nor the Bluetooth quirk.
+OTHER_MAC=(env "MOCK_MODEL=MacBookPro15,1")
 IMAC=(env "MOCK_MODEL=iMac19,1" MOCK_IOREG=requested "MOCK_IOREG_NVRAM=$KAUAI_TXT" MOCK_IOREG_TXCAP=kauai-X3.txcb)
 IMAC_NOIOREG=(env "MOCK_MODEL=iMac19,1" MOCK_IOREG=none)
 IMAC_BADIOREG=(env "MOCK_MODEL=iMac19,1" MOCK_IOREG=requested MOCK_IOREG_NVRAM=P-nosuch-X9_M-ZZZZ_V-u__m-0.0.txt MOCK_IOREG_TXCAP=nosuch-X9.txcb)
@@ -151,29 +149,37 @@ real_export_stat() { stat -f '%m %z' "$REAL_EXPORT" 2>/dev/null || echo absent; 
 REAL_EXPORT_BEFORE=$(real_export_stat)
 echo "firmware tree: $SRC ($N renamed members); scratch: $S"
 
-echo "== macOS (real uname) =="
-run M1-help              0 "FIRMWARE_SRC"                  "" "" ""  bash firmware.sh -h
-run M2-i-no-subcmd       0 "successfully saved"            "" "" ""  env HOME="$H" bash firmware.sh -i
-run M3-no-subcmd         0 "successfully saved"            "" "" ""  env HOME="$H" bash firmware.sh
-run M4-export_local      0 "successfully saved"            "" "" ""  bash firmware.sh export_local "$OUT/export"
-run M5-create_archive-gone 1 "Invalid option"              "" "" ""  bash firmware.sh create_archive
-run M6-rename_only-gone  1 "Invalid option"                "" "" ""  bash firmware.sh rename_only "$F/emptydir" "$OUT/x.tar"
-run M7-src-empty         1 "no Wi-Fi firmware found"       "" "" ""  env FIRMWARE_SRC="$F/emptydir" bash firmware.sh export_local "$OUT/ov-empty"
-run M8-src-missing       1 "is not a directory"            "" "" ""  env FIRMWARE_SRC="$F/nonexistent" bash firmware.sh export_local "$OUT/ov-none"
-run M9-src-override      0 "from $F/rawtree-txcap"         "" "" ""  env FIRMWARE_SRC="$F/rawtree-txcap" bash firmware.sh export_local "$OUT/ov-tree"
+echo "== macOS on MacBookPro15,1 (mocked system_profiler) =="
+run M1-help              0 "FIRMWARE_SRC"                  "" "" "$MM" "${OTHER_MAC[@]}" bash firmware.sh -h
+run M2-i-no-subcmd       0 "successfully saved"            "" "" "$MM" "${OTHER_MAC[@]}" HOME="$H" bash firmware.sh -i
+run M3-no-subcmd         0 "successfully saved"            "" "" "$MM" "${OTHER_MAC[@]}" HOME="$H" bash firmware.sh
+run M4-export_local      0 "successfully saved"            "" "" "$MM" "${OTHER_MAC[@]}" bash firmware.sh export_local "$OUT/export"
+run M5-create_archive-gone 1 "Invalid option"              "" "" "$MM" "${OTHER_MAC[@]}" bash firmware.sh create_archive
+run M6-rename_only-gone  1 "Invalid option"                "" "" "$MM" "${OTHER_MAC[@]}" bash firmware.sh rename_only "$F/emptydir" "$OUT/x.tar"
+run M7-src-empty         1 "no Wi-Fi firmware found"       "" "" "$MM" "${OTHER_MAC[@]}" FIRMWARE_SRC="$F/emptydir" bash firmware.sh export_local "$OUT/ov-empty"
+run M8-src-missing       1 "is not a directory"            "" "" "$MM" "${OTHER_MAC[@]}" FIRMWARE_SRC="$F/nonexistent" bash firmware.sh export_local "$OUT/ov-none"
+run M9-src-override      0 "from $F/rawtree-txcap"         "" "" "$MM" "${OTHER_MAC[@]}" FIRMWARE_SRC="$F/rawtree-txcap" bash firmware.sh export_local "$OUT/ov-tree"
 check M10-default-dir-N      'members_eq "$H/Downloads/apple-firmware-export/firmware.tar" "$N"'
-# export_local on this Mac adds nothing to what the renamer produced.
+# On a model without the txcap quirk export_local adds nothing to what the renamer produced.
 check M11-export-eq-renamer  'diff <(tar -tf "$OUT/export/firmware.tar") <(tar -tf "$B")'
 check M12-override-keeps-pair 'members_eq "$OUT/ov-tree/firmware.tar" "$N2" && has_member "$OUT/ov-tree/firmware.tar" $TXT && has_member "$OUT/ov-tree/firmware.tar" $BLOB'
 check M13-empty-src-no-tar   '[ ! -e "$OUT/ov-empty/firmware.tar" ]'
 check M14-real-home-untouched '[ "$(real_export_stat)" = "$REAL_EXPORT_BEFORE" ]'
 # The output directory may be relative to the repo, which is where the script is run from.
 RELOUT=$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$OUT/rel-out" "$REPO")
-run M15-relative-outdir  0 "successfully saved"            "" "" ""  bash firmware.sh export_local "$RELOUT"
+run M15-relative-outdir  0 "successfully saved"            "" "" "$MM" "${OTHER_MAC[@]}" bash firmware.sh export_local "$RELOUT"
 check M16-relative-outdir-N  'members_eq "$OUT/rel-out/firmware.tar" "$N"'
 # A root pair that is only symlinks is not carried over; tar would store it as links.
-run M17-src-symlink-pair 0 "successfully saved"            "" "" ""  env FIRMWARE_SRC="$F/rawtree-symlink-txcap" bash firmware.sh export_local "$OUT/ov-symlink"
+run M17-src-symlink-pair 0 "successfully saved"            "" "" "$MM" "${OTHER_MAC[@]}" FIRMWARE_SRC="$F/rawtree-symlink-txcap" bash firmware.sh export_local "$OUT/ov-symlink"
 check M18-symlink-pair-not-carried 'members_eq "$OUT/ov-symlink/firmware.tar" "$N" && ! has_member "$OUT/ov-symlink/firmware.tar" $TXT'
+# The leftover check in run goes by the mktemp log, so the log must see firmware.sh's own calls.
+check M19-mktemp-recorded    '[ -s "$OUT/M4-export_local.mktemp" ]'
+
+echo "== macOS on this Mac (real system_profiler) =="
+# The one case with this Mac's own identity. export_local refuses to write an archive that
+# lacks what the model needs, so success is the expectation on any Mac; on iMac19,1,
+# iMac19,2 and iMacPro1,1 it takes a pair named by the real ioreg.
+run H1-this-mac-export   0 "successfully saved"            "" "" ""  bash firmware.sh export_local "$OUT/this-mac"
 
 echo "== macOS on iMac19,1 (mocked system_profiler/ioreg) =="
 run X1-imac-export       0 "successfully saved"            "" "" "$MM" "${IMAC[@]}" bash firmware.sh export_local "$OUT/imac-ok"
