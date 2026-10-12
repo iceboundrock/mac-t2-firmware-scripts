@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      # firmware.sh skips its mkdir when /lib/firmware/brcm exists. No Mac has it, so the
+      # macOS job sees the mkdir; this makes the Linux job see the skip.
+      - if: runner.os == 'Linux'
+        run: sudo mkdir -p /lib/firmware/brcm
+      - run: bash tests/run.sh --synthetic

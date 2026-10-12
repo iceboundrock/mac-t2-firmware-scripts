@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Makes firmware.sh take its macOS branch, also when the suite runs on Linux.
+if [ "$1" = "-s" ]; then echo Darwin; else exec /usr/bin/uname "$@"; fi

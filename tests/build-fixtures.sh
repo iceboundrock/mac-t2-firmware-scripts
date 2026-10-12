@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Builds the inputs run.sh feeds firmware.sh into the directory given as $1, from this
-# Mac's /usr/share/firmware. The tree is Apple's, so nothing here is checked in; every
-# fixture is derived at run time.
+# Builds the inputs run.sh feeds firmware.sh into the directory given as $1, from the
+# firmware tree given as $2: a Mac's /usr/share/firmware, or a stand-in from
+# synth-tree.sh. Apple's tree cannot be checked in, so every fixture is derived at run
+# time.
 #
 # renamed.tar is rename_firmware.py's own output on the tree and stands in for a
 # firmware.tar from export_local on a Mac that is not one of the txcap models. The
@@ -9,13 +10,13 @@
 set -euo pipefail
 
 F=$1
+SRC=$2
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-SRC=/usr/share/firmware
 SRC4364="$SRC/wifi/C-4364__s-B2"
 TXT=brcmfmac4364b2-pcie.txt
 BLOB=brcmfmac4364b2-pcie.txcap_blob
 
-[ -d "$SRC/wifi" ] || { echo "build-fixtures: $SRC/wifi not found; this needs a Mac" >&2; exit 2; }
+[ -d "$SRC/wifi" ] || { echo "build-fixtures: $SRC/wifi not found" >&2; exit 2; }
 # The fake iMac19,1 cases need a 4364b2 pair ioreg could name: kauai-X3.txcb and a
 # P-kauai-X3*.txt, which is what a real iMac19,1 requests.
 KAUAI_TXT=$(cd "$SRC4364" 2>/dev/null && printf '%s\n' P-kauai-X3*.txt | head -1)

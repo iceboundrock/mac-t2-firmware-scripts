@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Stands in for /sys/class/dmi/id/product_name, which firmware.sh reads for the model
 # on Linux. MOCK_DMI_MODEL is the model identifier to report; left unset, the read
-# fails as it does on a Mac and firmware.sh sees an empty model. Everything else goes
-# to the real cat, including the heredocs firmware.sh prints with it.
-if [ "$1" = "/sys/class/dmi/id/product_name" ] && [ -n "${MOCK_DMI_MODEL-}" ]; then
+# fails as it does on a Mac and firmware.sh sees an empty model, also on a Linux host
+# whose own DMI file would name a model with a quirk. Everything else goes to the real
+# cat, including the heredocs firmware.sh prints with it.
+if [ "$1" = "/sys/class/dmi/id/product_name" ]; then
+	[ -n "${MOCK_DMI_MODEL-}" ] || { echo "cat: $1: No such file or directory" >&2; exit 1; }
 	echo "$MOCK_DMI_MODEL"
 else
 	exec /bin/cat "$@"
