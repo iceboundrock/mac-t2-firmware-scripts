@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Records each path mktemp creates, one per line in $MKTEMP_LOG, so run.sh can check
+# that the case removed the temp directories it made. Given no template, macOS mktemp
+# uses the per-user temp directory (_CS_DARWIN_USER_TEMP_DIR) whatever TMPDIR says, so a
+# case's directories cannot be steered somewhere of their own; recording them is what
+# tells them apart from other processes' tmp.* entries there. The real mktemp does the
+# work, with the same arguments.
+# Unset, the real mktemp runs unrecorded.
+[ -n "${MKTEMP_LOG-}" ] || exec /usr/bin/mktemp "$@"
+path=$(/usr/bin/mktemp "$@") || exit
+printf '%s\n' "$path" >> "$MKTEMP_LOG"
+printf '%s\n' "$path"

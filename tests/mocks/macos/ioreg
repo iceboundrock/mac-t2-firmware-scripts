@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Stands in for the RequestedFiles entry nvram_txcap_quirk parses. MOCK_IOREG selects
+# the output:
+#   requested  one RequestedFiles line in the shape of a real one (a MacBookPro18,3's,
+#              with 4364b2 names substituted), naming MOCK_IOREG_NVRAM as the NVRAM
+#              .txt and MOCK_IOREG_TXCAP as the txcap blob
+#   none       no RequestedFiles line at all
+# Unset, the real ioreg runs.
+case "${MOCK_IOREG-}" in
+	requested)
+		txcap="${MOCK_IOREG_TXCAP:?}"
+		echo "    | |   |   |   | |   \"RequestedFiles\" = ({\"Firmware\"=\"C-4364__s-B2/kauai.trx\",\"TxCap\"=\"C-4364__s-B2/$txcap\",\"Regulatory\"=\"C-4364__s-B2/${txcap%.txcb}.clmb\",\"NVRAM\"=\"C-4364__s-B2/${MOCK_IOREG_NVRAM:?}\"})"
+		;;
+	none)
+		echo '    | |   "IOClass" = "AppleBCMWLANCore"'
+		;;
+	*)
+		exec /usr/sbin/ioreg "$@"
+		;;
+esac
