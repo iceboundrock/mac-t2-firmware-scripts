@@ -25,7 +25,7 @@ jobs:
     # here; sw_vers says which release a run read.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - run: sw_vers
       # FIRMWARE_SRC stays unset, so the export_local cases also go through firmware.sh's
       # /usr/share/firmware default. Do not upload the scratch directory run.sh keeps when

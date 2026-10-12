@@ -16,7 +16,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       # firmware.sh skips its mkdir when /lib/firmware/brcm exists. No Mac has it, so the
       # macOS job sees the mkdir; this makes the Linux job see the skip.
       - if: runner.os == 'Linux'
