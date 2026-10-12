@@ -13,7 +13,8 @@
 # that set no FIRMWARE_SRC of their own inherit it, so they read the tree the reference
 # archive was built from. With --synthetic the tree is a stand-in from synth-tree.sh,
 # written into the scratch directory, so the suite runs without Apple's tree, which
-# cannot be checked in.
+# cannot be checked in. --synthetic and FIRMWARE_SRC each pick the tree, so the two
+# together exit 2 with the usage, as does any other argument.
 #
 # Needs bash and python3, and runs on macOS or Linux; on Linux the cases run GNU tar
 # instead of bsdtar. Only H1 depends on the host: the other macOS cases take their model
@@ -22,14 +23,23 @@
 # iMac19,1, iMac19,2 and iMacPro1,1 that goes through the real ioreg, which may name files
 # a synthetic tree lacks. Off macOS, H1 is skipped.
 #
-# Usage: [FIRMWARE_SRC=<tree>] bash tests/run.sh [--synthetic]
+# Usage: bash tests/run.sh [--synthetic]
+#        FIRMWARE_SRC=<tree> bash tests/run.sh
 
+usage() {
+	[ -z "${1-}" ] || echo "run.sh: $1" >&2
+	echo "usage: bash tests/run.sh [--synthetic]" >&2
+	echo "       FIRMWARE_SRC=<tree> bash tests/run.sh" >&2
+	exit 2
+}
 synthetic=""
-case "${1-}" in
-	("") ;;
-	(--synthetic) synthetic=1 ;;
-	(*) echo "usage: [FIRMWARE_SRC=<tree>] bash tests/run.sh [--synthetic]" >&2; exit 2 ;;
+case "$#:${1-}" in
+	(0:) ;;
+	(1:--synthetic) synthetic=1 ;;
+	(*) usage ;;
 esac
+[ -z "$synthetic" ] || [ -z "${FIRMWARE_SRC-}" ] ||
+	usage "--synthetic writes its own tree, but FIRMWARE_SRC names $FIRMWARE_SRC"
 TESTS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$TESTS")
 # firmware.sh calls rename_firmware.py by relative path, so it is run from the repo.
