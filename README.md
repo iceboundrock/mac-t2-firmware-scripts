@@ -2,43 +2,80 @@
 
 ## What is this
 
-Wi-Fi will not work out of the box during or after installation because the required firmware is proprietary and cannot be redistributed by any Linux distro (e.g.,  CachyOS). You will need an internet connection (e.g., Ethernet, USB tethering) for the installation process unless you follow the steps below to prepare the Wi-Fi firmware beforehand and enable it during installation.
+Wi-Fi will not work out of the box during or after Linux installation because the required firmware is proprietary and cannot be redistributed by any Linux distro (e.g., CachyOS). You will need an internet connection (e.g., Ethernet, USB tethering) for the installation process unless you follow the steps below to prepare the Wi-Fi firmware beforehand and enable it during installation.
 
-This script can extract the firmware from macOS and configure Linux network manager to use the firmware.
+This script extracts the Wi-Fi (and, on macOS Monterey or later, Bluetooth) firmware from macOS, renames the files the way the Linux `brcmfmac` driver expects, and installs them to `/lib/firmware/brcm`.
 
 ## Original Script
 
-The original script can be downloaded from [here](https://wiki.t2linux.org/tools/firmware.sh)
+The original script can be downloaded from [here](https://wiki.t2linux.org/tools/firmware.sh). `firmware.sh` and `rename_firmware.py` in this repo are a trimmed-down fork of it and keep its MIT license. The renaming logic in the Python script comes from the Asahi Linux project.
 
 ## Why this repo
 
-1. The original script does a lot of things and it contains code to download code/script from internet which may be a security concern.
-2. The original script uses the EFI partition as a temp storage for the firmware, I don't want a script mess up with my EFI partition.
-3. The original script has a python script embeded which is easy to distribute but hard to read
-4. The original script contains code to build installer packages for various Linux distro which I don't think they are necessary 
+1. The original script does a lot of things and it contains code to download code/script from internet which may be a security concern. It downloads and runs a Python script from GitHub to fetch a macOS recovery image, falls back to downloading itself from wiki.t2linux.org, and offers to run the Homebrew installer via `curl | bash`. It also installs missing packages for you with `sudo apt`/`dnf`/`pacman` or AUR `makepkg`.
+2. The original script uses the EFI partition as a temp storage for the firmware, I don't want a script messing with my EFI partition.
+3. The original script has a python script embedded which is easy to distribute but hard to read. It now lives in `rename_firmware.py`.
+4. The original script contains code to build installer packages (deb, rpm, pacman) for various Linux distros which I don't think are necessary.
+5. The original script can mount the macOS APFS partition from Linux and read the firmware from there. That needs the out-of-tree `linux-apfs-rw` driver, which the CachyOS live ISO doesn't have and which you can't install without the network you are trying to get. It also skips the `txcap` fix for iMac19,1/19,2 and iMacPro1,1, because that fix needs `ioreg` on macOS. A USB drive covers the same case, so that path is gone.
 
+What's left: on macOS, export the renamed firmware as a tarball to a folder or USB drive. On Linux, install from that tarball. Nothing is downloaded and no packages are installed on your behalf.
 
 ## Usage
 
+Both `firmware.sh` and `rename_firmware.py` are needed on macOS and on Linux, so copy the whole repo to the USB drive. Run the script from the repo directory: it calls `python3 rename_firmware.py` by relative path. `python3` is required on both sides (on macOS, `xcode-select --install` provides it if it is missing).
+
 ### Extract from macOS
 
-While still in macOS, open Terminal and run the following command. This copies the necessary Wi-Fi firmware files to your EFI partition, making them accessible later during the CachyOS installation.
+While still in macOS, open Terminal, `cd` into this repo and run:
 
 ```sh
-firmware.sh export_local
+bash firmware.sh export_local /Volumes/<your usb drive>/apple-firmware
 ```
+
+This reads `/usr/share/firmware`, renames the files and writes `firmware.tar` to the given directory. Without an argument it writes to `~/Downloads/apple-firmware-export/`.
+
+In special cases you can point it at a different firmware tree, such as a mounted volume from another Mac, with `FIRMWARE_SRC=/Volumes/<other mac>/usr/share/firmware bash firmware.sh export_local ...`. The `txcap` fix for iMac19,1, iMac19,2 and iMacPro1,1 still goes by the Mac running the script, so for those models export on the model itself. On those models, if it cannot find the pair the export fails rather than hand you an archive that `install_local` will refuse: it writes no new `firmware.tar`, and a `firmware.tar` already in the output directory is left as it was, so don't mistake an earlier export for this one.
+
+Bluetooth firmware is only included from macOS Monterey (12) or later, and is only needed by MacBookPro15,4, MacBookPro16,3 and MacBookAir9,1. On other models or older macOS you only get Wi-Fi firmware, which is fine.
 
 ### Install to Linux
 
+Boot the CachyOS live ISO (or the installed system), mount the USB drive, `cd` into the repo copy and run:
 
 ```sh
-sudo /tmp/apple-wifi-efi
-sudo mount <your usb drive> /tmp/apple-wifi-efi
-bash /tmp/apple-wifi-efi/firmware.sh get_from_efi
-sudo umount /tmp/apple-wifi-efi
+sudo mkdir -p /mnt/usb
+sudo mount /dev/sdX1 /mnt/usb
+bash firmware.sh install_local /mnt/usb/apple-firmware/firmware.tar
+sudo umount /mnt/usb
+```
+
+`install_local` extracts the tarball into `/lib/firmware/brcm` (creating it if missing) and reloads the `brcmfmac` driver, plus `hci_bcm4377` on the three models that use Bluetooth firmware. If a driver cannot be unloaded or loaded again (the module is in use, say), the files are installed but the running driver is not using them, so the script says so and exits non-zero instead of reporting success; a reboot loads the driver with the new firmware. Nothing runs under `sudo` until the input has passed the checks below. It also accepts a directory (a copy of `/usr/share/firmware`), a raw `.tar`, or the `firmware-raw.tar.gz` produced by the original script's EFI step, and runs the renaming step first in those cases. An archive is extracted first and counts as already renamed only if that leaves a `brcmfmac*.bin` at its top level, where the driver looks; otherwise it is treated as a raw tree. If you have mounted the macOS volume yourself, you can point it at `<mountpoint>/usr/share/firmware`.
+
+Two inputs are refused rather than installed. One is a path with no usable Wi-Fi firmware under it: a mistyped directory, say, or an archive whose `brcmfmac*.bin` files sit in a subdirectory and would land where the driver does not look. Either would otherwise install and still report success. The other is any input on iMac19,1, iMac19,2 and iMacPro1,1 that lacks `brcmfmac4364b2-pcie.txt` or `brcmfmac4364b2-pcie.txcap_blob` as a regular file; the archive is extracted and inspected, so a symlink or an empty file under that name does not count. Those models load the firmware under these generic names, and picking the right pair out of the tree needs `ioreg`, so only macOS can produce them: `export_local` run on the model itself, or the original script's EFI step, which put the pair at the root of its `firmware-raw.tar.gz` (`install_local` keeps it when renaming that archive). Any other directory or raw tar renamed on Linux will not work on those models.
+
+Then switch NetworkManager to the iwd backend:
+
+```sh
 cat <<EOF | sudo tee /etc/NetworkManager/conf.d/wifi_backend.conf
 [device]
 wifi.backend=iwd
 EOF
 sudo systemctl restart NetworkManager
 ```
+
+## Subcommands
+
+```
+usage: firmware.sh [-ivhx] [subcommand] [subcmd args]
+```
+
+| Subcommand | Platform | What it does |
+|---|---|---|
+| `export_local [output_dir]` | macOS | Write renamed `firmware.tar` to `output_dir` (default `~/Downloads/apple-firmware-export`), reading `/usr/share/firmware` or `$FIRMWARE_SRC` |
+| `install_local [path]` | Linux | Install from a `.tar`, `.tar.gz` or directory; prompts for the path if omitted |
+
+Flags: `-i` never prompt (`install_local` fails instead of asking for a path), `-v` verbose, `-x` trace with `set -x`, `-h` help. The subcommand is optional: with none, the script runs `export_local` on macOS and `install_local` on Linux.
+
+## License
+
+MIT. See [LICENSE](LICENSE). The original authors' copyright notices from the upstream script are preserved there.

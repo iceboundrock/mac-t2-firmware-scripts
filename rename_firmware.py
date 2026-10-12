@@ -317,12 +317,17 @@ class FWPackage(object):
 
 logging.getLogger().setLevel(logging.WARNING if (len(sys.argv) >= 4 and sys.argv[3] == "-v") else logging.ERROR)
 
+firmware_tree = sys.argv[1]
+wifi_files = sorted(WiFiFWCollection(firmware_tree + "/wifi").files())
+if not wifi_files:
+	sys.exit(f"Error: no Wi-Fi firmware found under {firmware_tree}/wifi. Expected a copy of macOS /usr/share/firmware.")
+
+# Open the output only once there is something to write, so a bad input leaves no empty archive behind.
 pkg = FWPackage(sys.argv[2])
-wifi_col = WiFiFWCollection(sys.argv[1]+"/wifi")
-pkg.add_files(sorted(wifi_col.files()))
-if not Path(sys.argv[1] + "/bluetooth").exists():
+pkg.add_files(wifi_files)
+if not Path(firmware_tree + "/bluetooth").exists():
 	log.warning("\nBluetooth firmware missing.\nOnly Wi-Fi firmware shall be extracted.\n")
 else:
-	bt_col = BluetoothFWCollection(sys.argv[1]+"/bluetooth")
+	bt_col = BluetoothFWCollection(firmware_tree + "/bluetooth")
 	pkg.add_files(sorted(bt_col.files()))
 pkg.close()
