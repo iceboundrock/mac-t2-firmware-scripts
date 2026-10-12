@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # Records what firmware.sh would have run as root instead of running it. Every call
-# is appended to $SUDO_LOG as "sudo: <command line>". For tar, the member count and the
-# member listing of the archive it was handed are recorded too (in $SUDO_LOG and
-# $SUDO_LOG.members), since those are what would land in /lib/firmware/brcm.
+# is appended to $SUDO_LOG as "sudo: <command line>". For tar, the manifest of the
+# archive it was handed (tests/tar_manifest.py: each member's name and contents) is
+# appended to $SUDO_LOG.manifest, since that is what would land in /lib/firmware/brcm.
 #
 # SUDO_FAIL names one command line, as written after sudo (e.g. "modprobe -r brcmfmac"),
 # that fails the way unloading a module in use or loading a missing module does.
 echo "sudo: $*" >> "${SUDO_LOG:?}"
 if [ "$1" = "tar" ]; then
-	archive="${!#}"
-	echo "sudo-tar-members: $(tar -tf "$archive" | wc -l | tr -d ' ')" >> "$SUDO_LOG"
-	tar -tf "$archive" > "$SUDO_LOG.members"
+	python3 "$(dirname "${BASH_SOURCE[0]}")/../../tar_manifest.py" "${!#}" >> "$SUDO_LOG.manifest"
 fi
 if [ -n "${SUDO_FAIL-}" ] && [ "$*" = "$SUDO_FAIL" ]; then
 	echo "modprobe: FATAL: Module ${!#} is in use." >&2

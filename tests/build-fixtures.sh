@@ -43,7 +43,8 @@ tar -cf "$F/raw.tar" -C "$SRC" .
 gzip -c --best "$F/raw.tar" > "$F/raw.tar.gz"
 
 # A tree with a synthesized pair at its root, as the upstream script's EFI step leaves
-# it (6-byte files; the content is never read).
+# it (6-byte stand-ins: firmware.sh only carries them over, and run.sh compares the
+# installed copies with these by content).
 copy_tree "$F/rawtree-txcap"
 printf 'nvram\n' > "$F/rawtree-txcap/$TXT"
 printf 'txcap\n' > "$F/rawtree-txcap/$BLOB"
