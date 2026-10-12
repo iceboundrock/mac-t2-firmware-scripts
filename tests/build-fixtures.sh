@@ -90,7 +90,7 @@ ln -s wifi/C-4364__s-B2/kauai-X3.txcb "$F/rawtree-symlink-txcap/$BLOB"
 # A .tar counts as renamed only if extracting it leaves a usable brcmfmac*.bin at the
 # top level: the only member nested, the name as a zero-byte file, the name as a
 # dangling symlink, the renamed archive re-stored under ./, and the renamed archive
-# gzipped.
+# gzipped under each suffix install_local accepts for it.
 mkdir -p "$F/nested-bin/wrong-subdir"
 echo data > "$F/nested-bin/wrong-subdir/brcmfmac4364b3-pcie.apple.bin"
 tar -cf "$F/nested-bin.tar" -C "$F/nested-bin" wrong-subdir/brcmfmac4364b3-pcie.apple.bin
@@ -104,3 +104,4 @@ mkdir -p "$F/renamed-tree"
 tar -xf "$B" -C "$F/renamed-tree"
 (cd "$F/renamed-tree" && tar -cf "$F/renamed-dotslash.tar" ./*)
 gzip -c --best "$B" > "$F/renamed.tar.gz"
+cp "$F/renamed.tar.gz" "$F/renamed.tgz"
